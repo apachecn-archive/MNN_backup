@@ -71,7 +71,8 @@ option(MNN_AAPL_FMWK "Build MNN.framework instead of traditional .a/.dylib" OFF)
 option(MNN_WITH_PLUGIN "Build with plugin op support." OFF)
 option(MNN_BUILD_MINI "Build MNN-MINI that just supports fixed shape models." OFF)
 option(MNN_USE_SSE "Use SSE optimization for x86 if possiable" ON)
-option(MNN_BUILD_CODEGEN "Build with codegen" OFF)
+#enable codegen
+option(MNN_BUILD_CODEGEN "Build with codegen" ON)
 option(MNN_ENABLE_COVERAGE "Build with coverage enable" OFF)
 
 IF(NOT MNN_BUILD_SHARED_LIBS AND MNN_SEP_BUILD)
