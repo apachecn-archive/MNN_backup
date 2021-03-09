@@ -432,6 +432,7 @@ void CPUBackend::onCopyBuffer(const Tensor* srcTensor, const Tensor* dstTensor) 
     MNN_ASSERT(srcBuffer.dimensions == dstBuffer.dimensions);
     if (srcTensor->getDimensionType() == dstTensor->getDimensionType()) {
         for (int i = 0; i < srcBuffer.dimensions; ++i) {
+            //lms 这里校验srcBuffer是否小于dstBuffer，这样才存在拷贝的可能性
             MNN_ASSERT(srcBuffer.dim[i].extent <= dstBuffer.dim[i].extent);
         }
     }

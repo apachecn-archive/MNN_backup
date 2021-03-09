@@ -313,7 +313,7 @@ Tensor* Interpreter::getSessionInput(const Session* session, const char* name) {
     }
     std::unique_lock<std::mutex> _l(mNet->lock);
     auto tensor = session->getInput(name);
-    mNet->tensorMap.insert(std::make_pair(tensor, session));
+    mNet->tensorMap.insert(std::make_pair(tensor, session));//lms 在net中把tensor与session建立联系
     return tensor;
 }
 
