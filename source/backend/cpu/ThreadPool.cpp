@@ -181,7 +181,7 @@ ThreadPool::ThreadPool(int numberThread) {
                             { *mTasks[i].second[threadIndex] = false; }
                         }
                     }
-                    std::this_thread::yield();
+                    std::this_thread::yield();//lms https://stackoverflow.com/questions/11048946/stdthis-threadyield-vs-stdthis-threadsleep-for
                 }
                 std::unique_lock<std::mutex> _l(mQueueMutex);
                 mCondition.wait(_l, [this] { return mStop || mActiveCount > 0; });
@@ -248,6 +248,7 @@ void ThreadPool::deactive() {
 }
 
 void ThreadPool::enqueue(TASK&& task, int index) {
+        //lms 将task压入队列
     if (1 >= task.second || 0 > index) {
         for (int i = 0; i < task.second; ++i) {
             task.first(i);
@@ -265,7 +266,7 @@ void ThreadPool::enqueueInternal(TASK&& task, int index) {
         return;
     }
     int workSize = task.second;
-    if (workSize > mNumberThread) {
+    if (workSize > mNumberThread) {//lms 这个task需求的线程数超过了mNumberThread
         mTasks[index].first = std::make_pair(
             [workSize, &task, this](int tId) {
                 for (int v = tId; v < workSize; v += mNumberThread) {

@@ -16,6 +16,7 @@
 #elif defined(MNN_USE_THREAD_POOL)
 #include "backend/cpu/ThreadPool.hpp"
 
+//lms 这里
 #define MNN_STRINGIFY(a) #a
 #define MNN_CONCURRENCY_BEGIN(__iter__, __num__)       \
     {                                                  \
