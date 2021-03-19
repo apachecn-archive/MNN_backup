@@ -22,12 +22,13 @@ namespace MNN {
 ThreadPool* ThreadPool::gInstance = nullptr;
 static std::mutex gInitMutex;
 int ThreadPool::init(int number) {
+    //lms init保证线程池只会分配一次
     if (1 >= number) {
         return 1;
     }
     std::lock_guard<std::mutex> _l(gInitMutex);
     if (nullptr != gInstance) {
-        if (gInstance->number() < number) {
+        if (gInstance->number() < number) {// lms 如果设置分配的线程数number大于已经存在的线程数，维持现在的数目
             return gInstance->number();
         }
     }
@@ -151,15 +152,16 @@ static int setSchedAffinity(const std::vector<int>& cpuIDs) {
 #endif // arch
 ThreadPool::ThreadPool(int numberThread) {
     mNumberThread = numberThread;
-    mActiveCount  = 0;
+    mActiveCount  = 0; //需要处理的task数目
     mTaskAvailable.resize(MNN_THREAD_POOL_MAX_TASKS);
     mTasks.resize(MNN_THREAD_POOL_MAX_TASKS);
     for (int t = 0; t < mTasks.size(); ++t) {
         mTaskAvailable[t] = true;
         for (int i = 0; i < mNumberThread; ++i) {
-            mTasks[t].second.emplace_back(new std::atomic_bool{false});
+            mTasks[t].second.emplace_back(new std::atomic_bool{false}); // lms 这里用来记录task是在哪个线程运行？
         }
     }
+//lms CPU锁频时
 #ifdef MNN_THREAD_LOCK_CPU
     std::vector<int> sortedCPUIDs = sortCPUIDByMaxFrequency(numberThread);
 #endif
@@ -173,16 +175,17 @@ ThreadPool::ThreadPool(int numberThread) {
 #ifdef MNN_THREAD_LOCK_CPU
             int res = setSchedAffinity(sortedCPUIDs);
 #endif
-            while (!mStop) {
+            while (!mStop) {//lms 线程池处于工作状态
                 while (mActiveCount > 0) {
                     for (int i = 0; i < MNN_THREAD_POOL_MAX_TASKS; ++i) {
                         if (*mTasks[i].second[threadIndex]) {
-                            mTasks[i].first.first(threadIndex);
+                            mTasks[i].first.first(threadIndex); //lms 执行的task
                             { *mTasks[i].second[threadIndex] = false; }
                         }
                     }
                     std::this_thread::yield();//lms https://stackoverflow.com/questions/11048946/stdthis-threadyield-vs-stdthis-threadsleep-for
                 }
+                //lms 当前不存在工作，阻塞当前线程，等待信号量唤醒
                 std::unique_lock<std::mutex> _l(mQueueMutex);
                 mCondition.wait(_l, [this] { return mStop || mActiveCount > 0; });
             }
@@ -195,7 +198,7 @@ ThreadPool::~ThreadPool() {
         std::lock_guard<std::mutex> _l(mQueueMutex);
         mStop = true;
     }
-    mCondition.notify_all();
+    mCondition.notify_all();//lms 唤醒所有线程，线程池要销毁了
     for (auto& worker : mWorkers) {
         worker.join();
     }
@@ -213,7 +216,7 @@ int ThreadPool::acquireWorkIndex() {
     std::lock_guard<std::mutex> _l(gInstance->mQueueMutex);
     for (int i = 0; i < MNN_THREAD_POOL_MAX_TASKS; ++i) {
         if (gInstance->mTaskAvailable[i]) {
-            gInstance->mTaskAvailable[i] = false;
+            gInstance->mTaskAvailable[i] = false;//lms 返回第i个task的下标，同时将其状态置为false，这个task不可用，已经在执行
             return i;
         }
     }
@@ -236,9 +239,9 @@ void ThreadPool::active() {
     }
     {
         std::lock_guard<std::mutex> _l(gInstance->mQueueMutex);
-        gInstance->mActiveCount++;
+        gInstance->mActiveCount++;//lms 活跃的task数
     }
-    gInstance->mCondition.notify_all();
+    gInstance->mCondition.notify_all();// lms  //通知所有线程有task了
 }
 void ThreadPool::deactive() {
     if (nullptr == gInstance) {
@@ -249,7 +252,7 @@ void ThreadPool::deactive() {
 
 void ThreadPool::enqueue(TASK&& task, int index) {
         //lms 将task压入队列
-    if (1 >= task.second || 0 > index) {
+    if (1 >= task.second || 0 > index) { //lms 如果task设定需要的线程数小于1或者task_index有问题，那么就直接单线程了
         for (int i = 0; i < task.second; ++i) {
             task.first(i);
         }
@@ -259,14 +262,14 @@ void ThreadPool::enqueue(TASK&& task, int index) {
     gInstance->enqueueInternal(std::move(task), index);
 }
 void ThreadPool::enqueueInternal(TASK&& task, int index) {
-    if (mActiveCount == 0) {
+    if (mActiveCount == 0) {//lms 如果task为0
         for (int i = 0; i < task.second; ++i) {
             task.first(i);
         }
         return;
     }
-    int workSize = task.second;
-    if (workSize > mNumberThread) {//lms 这个task需求的线程数超过了mNumberThread
+    int workSize = task.second;// worksize是当前task指定需求的线程数
+    if (workSize > mNumberThread) {//lms 这个task需求的线程数超过了mNumberThread,那么将task重新包装，让他循环利用所有线程
         mTasks[index].first = std::make_pair(
             [workSize, &task, this](int tId) {
                 for (int v = tId; v < workSize; v += mNumberThread) {
@@ -274,21 +277,21 @@ void ThreadPool::enqueueInternal(TASK&& task, int index) {
                 }
             },
             mNumberThread);
-        workSize = mNumberThread;
+        workSize = mNumberThread;//lms task被重新包装了，workSize可以改成最大线程数量了
     } else {
-        mTasks[index].first = std::move(task);
+        mTasks[index].first = std::move(task);// lms 将task放到队列中
     }
     {
         for (int i = 1; i < workSize; ++i) {
             *mTasks[index].second[i] = true;
         }
     }
-    mTasks[index].first.first(0);
+    mTasks[index].first.first(0);//主线程执行一部分
     bool complete = true;
     do {
         std::this_thread::yield();
         complete = true;
-        for (int i = 1; i < workSize; ++i) {
+        for (int i = 1; i < workSize; ++i) { //lms 如果每个线程都把task执行完了
             if (*mTasks[index].second[i]) {
                 complete = false;
                 break;
