@@ -91,7 +91,7 @@ protected:
 
 typedef std::function<bool(const std::vector<Tensor*>&, const std::string& /*opName*/)> TensorCallBack;
 typedef std::function<bool(const std::vector<Tensor*>&, const OperatorInfo*)> TensorCallBackWithInfo;
-typedef std::pair<std::map<MNNForwardType, std::shared_ptr<Runtime>>, std::shared_ptr<Runtime>> RuntimeInfo;
+typedef std::pair<std::map<MNNForwardType, std::shared_ptr<Runtime>>, std::shared_ptr<Runtime>> RuntimeInfo; //lms 保存不同backend的runtimeinfo,pair.second保存的是默认的backend信息
 
 /** net data holder. multiple sessions could share same net. */
 class MNN_PUBLIC Interpreter {
