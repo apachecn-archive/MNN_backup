@@ -207,7 +207,7 @@ ErrorCode CPUMatMul::onExecute(const std::vector<Tensor*>& inputs, const std::ve
 
 void CPUMatMul::execute(const float* APtr, const float* BPtr, float* CPtr, const float* biasPtr) {
     for (auto& f : mPreFunctions) {
-        //lms f : std::vector<std::pair<std::function<void(int, const float*, const float*)>, int>>
+        //lms mPreFunctions : std::vector<std::pair<std::function<void(int, const float*, const float*)>, int>>
         MNN_CONCURRENCY_BEGIN(tId, f.second) {
             f.first(tId, APtr, BPtr, biasPtr);
         }

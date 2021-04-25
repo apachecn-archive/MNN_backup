@@ -40,6 +40,12 @@ if(MNN_CODEGEN_LLVM)
     list(APPEND MNN_EXTRA_DEPENDS ${llvm_libs})
 endif()
 
+#if (MNN_WITH_PLUGIN)
+#    message(STATUS "编译wrapper")
+#    file(GLOB PLUGIN_WRAPPER_SRCS "${CMAKE_CURRENT_LIST_DIR}/plugin_wrapper/*.*")
+#    list(APPEND MNN_CODEGEN_SRCS ${PLUGIN_WRAPPER_SRCS})
+#endif()
+
 add_library(MNNCodegen OBJECT ${MNN_CODEGEN_SRCS})
 set_property(TARGET MNNCodegen PROPERTY CXX_STANDARD 14)
 list(APPEND MNN_OBJECTS_TO_LINK $<TARGET_OBJECTS:MNNCodegen>)
