@@ -232,7 +232,7 @@ Session* Interpreter::createMultiPathSession(const std::vector<ScheduleConfig>& 
     auto validForResize = info.validForResize;
     RuntimeInfo rt = runtime;
     auto newSession =
-        std::unique_ptr<Session>(new Session(std::move(info), mNet->callBackMode, mNet->inputMode, std::move(rt)));
+        std::unique_ptr<Session>(new Session(std::move(info), mNet->callBackMode, mNet->inputMode, std::move(rt)));//lms 创建session
     if (!newSession->valid()) {
         MNN_PRINT("Invalide Session!!\n");
         return nullptr;
@@ -265,8 +265,7 @@ Session* Interpreter::createMultiPathSession(const std::vector<ScheduleConfig>& 
     }
     // Reset cache
     result->loadCache(nullptr, 0);
-
-    mNet->sessions.emplace_back(std::move(newSession));
+mNet->sessions.emplace_back(std::move(newSession));//lms Net包含Session
     
     //for valid cacheFile, maybe need update after resize
     if(valid) {
