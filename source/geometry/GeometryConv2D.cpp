@@ -13,7 +13,7 @@
 #include <MNN/AutoTime.hpp>
 namespace MNN {
 
-class GeometryConv2D : public GeometryComputer {
+class GeometryConv2D : public DefaultGeometryComputer {
 public:
     // Im2Col + GEMM
     bool computeIm2Col_GEMM(  const Convolution2DCommon* common, const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
@@ -135,6 +135,14 @@ public:
         }
         auto common = op->main_as_Convolution2D()->common();
         if (common->outputCount() > 0) {
+            // FIXME: Remove this logical in future
+            if (context.forwardType() == MNN_FORWARD_CPU || context.forwardType() == MNN_FORWARD_CPU_EXTENSION || context.forwardType() == MNN_FORWARD_OPENCL) {
+                auto inputDes     = TensorUtils::getDescribe(inputs[0]);
+                auto format       = inputDes->dimensionFormat;
+                if (MNN_DATA_FORMAT_NC4HW4 == format) {
+                    return DefaultGeometryComputer::onCompute(op, inputs, outputs, context, res);
+                }
+            }
             return computeIm2Col_GEMM(common, inputs, outputs, context, res);
         }
         std::unique_ptr<Convolution2DCommonT> temp(common->UnPack());
@@ -214,12 +222,12 @@ public:
             // Col2Im:
             // 1. C-> C' batch, oc, oh, ow, kw*kh, 2. C' -> C'' batch, oc, oh, ow (reduce_sum)
             // 3. C'' -> C'' + bias, 4. posttreat(C'' + bias)
-            std::shared_ptr<Tensor> C_(Tensor::createDevice<float>({batch, kw * kh, oc * oh * ow}));
+            std::shared_ptr<Tensor> C_(Tensor::createDevice<float>({1, kw * kh, batch * oc * oh * ow}));
             res.extras.emplace_back(C_);
             {
                 std::shared_ptr<Tensor> im2ColTemp(Tensor::createDevice<float>({oc * kw * kh, batch * ih * iw}));
                 // Swap ow, iw, oh, ih for im2Col
-                GeometryConvUtils::im2Col(im2ColTemp.get(), outputDiff, oc, kh, kw, batch, ih, iw, oh, ow, sh, sw, dh, dw, pads, oh * ow * oc);
+                GeometryConvUtils::im2Col(im2ColTemp.get(), outputDiff, oc, kh, kw, batch, ih, iw, oh, ow, sh, sw, dh, dw, pads, oh * ow * oc * batch);
                 auto des = TensorUtils::getDescribe(C_.get());
                 des->memoryType = Tensor::InsideDescribe::MEMORY_VIRTUAL;
                 auto originDes = TensorUtils::getDescribe(im2ColTemp.get());
@@ -232,13 +240,13 @@ public:
                     reg.dst = std::move(temp);
                 }
             }
-            std::shared_ptr<Tensor> C__(Tensor::createDevice<float>({batch, 1, oc * oh * ow}));
+            std::shared_ptr<Tensor> C__(Tensor::createDevice<float>({1, 1, batch * oc * oh * ow}));
             res.extras.emplace_back(C__);
             res.command.emplace_back(GeometryComputerUtils::makeReduce(ReductionType_SUM, C_.get(), C__.get()));
 
             if (inputs.size() > 2) {
                 MNN_ASSERT(oc == inputs[2]->elementSize());
-                std::shared_ptr<Tensor> biasLarge(Tensor::createDevice<float>({batch, 1, oc * oh * ow}));
+                std::shared_ptr<Tensor> biasLarge(Tensor::createDevice<float>({1, 1, batch * oc * oh * ow}));
                 res.extras.emplace_back(biasLarge);
                 auto des = TensorUtils::getDescribe(biasLarge.get());
                 des->memoryType = Tensor::InsideDescribe::MEMORY_VIRTUAL;
@@ -256,7 +264,7 @@ public:
                 reg.dst.stride[0] = oc * oh * ow;
                 reg.dst.stride[1] = oh * ow;
                 reg.dst.stride[2] = 1;
-                std::shared_ptr<Tensor> temp(Tensor::createDevice<float>({batch, 1, oh * ow * oc}));
+                std::shared_ptr<Tensor> temp(Tensor::createDevice<float>({1, 1, batch * oh * ow * oc}));
                 res.extras.emplace_back(temp);
                 res.command.emplace_back(GeometryComputerUtils::makeBinary(BinaryOpOperation_ADD, C__.get(), biasLarge.get(), temp.get()));
                 C__ = temp;
@@ -281,9 +289,9 @@ public:
                 std::shared_ptr<Tensor> C2(new Tensor);
                 C2->buffer().type       = halide_type_of<float>();
                 C2->buffer().dimensions = 3;
-                C2->setLength(0, batch);
+                C2->setLength(0, 1);
                 C2->setLength(1, 1);
-                C2->setLength(2, ow * oh * oc);
+                C2->setLength(2, batch * ow * oh * oc);
                 TensorUtils::getDescribe(C2.get())->dimensionFormat = MNN_DATA_FORMAT_NCHW;
                 auto cmd = GeometryComputerUtils::makeCommand(builder, {C__.get()}, {C2.get()});
                 res.command.emplace_back(cmd);

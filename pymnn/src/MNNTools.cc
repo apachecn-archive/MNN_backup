@@ -3,87 +3,42 @@
 */
 #include <Python.h>
 #include "structmember.h"
-
+#include "util.h"
 #include "MNN_generated.h"
-#include "PostConverter.hpp"
-#include "addBizCode.hpp"
-#include "caffeConverter.hpp"
-#include "liteConverter.hpp"
-#include "onnxConverter.hpp"
-#include "tensorflowConverter.hpp"
-#include "writeFb.hpp"
 #include "config.hpp"
-#include "options.hpp"
-#include "common/Global.hpp"
+#include "cli.hpp"
 #include "calibration.hpp"
 #include "logkit.h"
+#include <MNN/MNNDefine.h>
+#include <vector>
 using namespace MNN;
 using namespace std;
 /// module init
 
-static PyObject* PyTool_Converter(PyObject *self, PyObject *args) {
-
-    const char* mnnModel = NULL;
-    const char* modelFile = NULL;
-    const char* compressionParamsFile = NULL;
-    const char* prototxtFile = NULL;
-    PyObject* frameworkType = NULL;
-    PyObject* fp16 = NULL;
-    PyObject* weightQuantBits = NULL;
-    PyObject* weightQuantAsymmetric = NULL;
-    if (!PyArg_ParseTuple(args, "ssOO|sOOs", &mnnModel, &modelFile,
-                          &frameworkType, &fp16, &prototxtFile,
-                          &weightQuantBits, &weightQuantAsymmetric, &compressionParamsFile)) {
-        return NULL;
+static PyObject* PyTool_Converter(PyObject *self, PyObject *argsTuple) {
+    int tupleSize = PyTuple_GET_SIZE(argsTuple);
+    if (tupleSize < 1) {
+        MNN_ERROR("Invalid input for Converter\n");
+        return nullptr;
     }
-    struct modelConfig modelPath;
-    modelPath.MNNModel = std::string(mnnModel);
-    modelPath.modelFile = std::string(modelFile);
-    modelPath.model = static_cast<modelConfig::MODEL_SOURCE>(PyLong_AsLong(frameworkType));
-    modelPath.bizCode = std::string("");
-    modelPath.benchmarkModel = false;
-    modelPath.saveHalfFloat = static_cast<bool>(PyLong_AsLong(fp16));
-    modelPath.forTraining = false;
-    modelPath.weightQuantBits = static_cast<int>(PyLong_AsLong(weightQuantBits));
-    modelPath.weightQuantAsymmetric = static_cast<bool>(PyLong_AsLong(weightQuantAsymmetric));
-    if(prototxtFile){
-        modelPath.prototxtFile = std::string(prototxtFile);
+    PyObject* args = PyTuple_GET_ITEM(argsTuple, 0);
+    int argSize = PyList_Size(args);
+    std::vector<char*> argsCpp(argSize);
+    std::vector<PyObject*> argsContant(argSize);
+    for (int i=0; i<argSize; ++i) {
+        argsContant[i] = PyList_GetItem(args, i);
+        PyArg_Parse(argsContant[i], "s", argsCpp.data() + i);
     }
-
-    common::Options options;
-    if (compressionParamsFile) {
-        modelPath.compressionParamsFile = std::string(compressionParamsFile);
-        options = common::BuildOptions(modelPath.compressionParamsFile);
+    modelConfig modelPath;
+    auto res = MNN::Cli::initializeMNNConvertArgs(modelPath, argSize, argsCpp.data());
+    if (!res) {
+        Py_RETURN_TRUE;
     }
-
-    Global<modelConfig>::Reset(&modelPath);
-
-    std::unique_ptr<MNN::NetT> netT = std::unique_ptr<MNN::NetT>(new MNN::NetT());
-    if (modelPath.model == modelConfig::CAFFE) {
-        caffe2MNNNet(modelPath.prototxtFile, modelPath.modelFile, modelPath.bizCode, options, netT);
-    } else if (modelPath.model == modelConfig::TENSORFLOW) {
-        tensorflow2MNNNet(modelPath.modelFile, modelPath.bizCode, options, netT);
-    } else if (modelPath.model == modelConfig::MNN) {
-        addBizCode(modelPath.modelFile, modelPath.bizCode, options, netT);
-    } else if (modelPath.model == modelConfig::ONNX) {
-        onnx2MNNNet(modelPath.modelFile, modelPath.bizCode, options, netT);
-    } else if (modelPath.model == modelConfig::TFLITE) {
-        tflite2MNNNet(modelPath.modelFile, modelPath.bizCode, options, netT);
-    } else {
-        std::cout << "Not Support Model Type" << std::endl;
-    }
-
-    if (modelPath.model != modelConfig::MNN) {
-        std::cout << "Start to Optimize the MNN Net..." << std::endl;
-        std::unique_ptr<MNN::NetT> newNet = optimizeNet(netT, modelPath.forTraining);
-        writeFb(newNet, modelPath.MNNModel, modelPath);
-    } else {
-        writeFb(netT, modelPath.MNNModel, modelPath);
-    }
+    MNN::Cli::convertModel(modelPath);
     Py_RETURN_TRUE;
 }
-static PyObject* PyTool_Quantization(PyObject *self, PyObject *args) {
 
+static PyObject* PyTool_Quantization(PyObject *self, PyObject *args) {
     const char* modelFile      = NULL;
     const char* preTreatConfig = NULL;
     const char* dstFile        = NULL;
@@ -121,21 +76,13 @@ static PyObject* PyTool_Quantization(PyObject *self, PyObject *args) {
     // quantize model's weight
     DLOG(INFO) << "Calibrate the feature and quantize model...";
     std::shared_ptr<Calibration> calibration(
-        new Calibration(netT.get(), modelForInference.get(), size, preTreatConfig));
+        new Calibration(netT.get(), modelForInference.get(), size, preTreatConfig, std::string(modelFile), std::string(dstFile)));
     calibration->runQuantizeModel();
+    calibration->dumpTensorScales(dstFile);
     DLOG(INFO) << "Quantize model done!";
 
-    flatbuffers::FlatBufferBuilder builderOutput(1024);
-    builderOutput.ForceDefaults(true);
-    auto len = MNN::Net::Pack(builderOutput, netT.get());
-    builderOutput.Finish(len);
-
-    {
-        std::ofstream output(dstFile);
-        output.write((const char*)builderOutput.GetBufferPointer(), builderOutput.GetSize());
-    }
-
     Py_RETURN_TRUE;
+
 }
 static PyMethodDef module_methods[] = {
     { "mnnconvert", (PyCFunction)PyTool_Converter, METH_VARARGS, NULL },

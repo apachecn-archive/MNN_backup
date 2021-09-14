@@ -101,6 +101,10 @@ int main(int argc, const char* argv[]) {
     if (argc > 4) {
         tolerance = stringConvert<float>(argv[4]);
     }
+    auto precision = MNN::BackendConfig::Precision_High;
+    if (argc > 5) {
+        precision = (MNN::BackendConfig::PrecisionMode)(stringConvert<int>(argv[5]));
+    }
 
     // input config
     ConfigFile config(argv[2]);
@@ -120,11 +124,8 @@ int main(int argc, const char* argv[]) {
     MNN::ScheduleConfig schedule;
     schedule.type = type;
     MNN::BackendConfig backendConfig;
-    if (type != MNN_FORWARD_CPU) {
-        // Use Precision_High for other backend
-        // Test CPU ARM v8.2 and other approciate method
-        backendConfig.precision = MNN::BackendConfig::Precision_High;
-    }
+    backendConfig.precision = precision;
+
     schedule.backendConfig = &backendConfig;
 
     auto session  = net->createSession(schedule);
@@ -162,10 +163,22 @@ int main(int argc, const char* argv[]) {
         bool correct = true;
         for (int i = 0; i < numOfOuputs; ++i) {
             auto outputTensor = net->getSessionOutput(session, expectNames[i].c_str());
-            std::ostringstream iStrOs;
-            iStrOs << i;
-            auto expectName   = modelDir + iStrOs.str() + ".txt";
-            auto expectTensor = createTensor(outputTensor, expectName);
+            MNN::Tensor* expectTensor = nullptr;
+            std::string expectName;
+            // First Check outputname.txt
+            {
+                std::ostringstream iStrOs;
+                iStrOs << expectNames[i];
+                expectName   = modelDir + iStrOs.str() + ".txt";
+                expectTensor = createTensor(outputTensor, expectName);
+            }
+            if (!expectTensor) {
+                // Second check number outputs
+                std::ostringstream iStrOs;
+                iStrOs << i;
+                expectName   = modelDir + iStrOs.str() + ".txt";
+                expectTensor = createTensor(outputTensor, expectName);
+            }
             if (!expectTensor) {
 #if defined(_MSC_VER)
                 std::cout << "Failed to open " << expectName << std::endl;

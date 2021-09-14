@@ -1,3 +1,11 @@
+//
+//  PassRegistry.hpp
+//  MNNConverter
+//
+//  Created by MNN on b'2020/12/07'.
+//  Copyright © 2018, Alibaba Group Holding Limited
+//
+
 #ifndef MNN_CONVERTER_PASSES_PASS_REGISTRY_HPP_
 #define MNN_CONVERTER_PASSES_PASS_REGISTRY_HPP_
 
@@ -7,13 +15,13 @@
 namespace MNN {
 namespace passes {
 
-class PassRegistry {
+class MNN_PUBLIC PassRegistry {
 public:
     static Pass* GetPass(const std::string& name);
     static void AddPass(std::unique_ptr<Pass>&& pass);
 };
 
-class PassManagerRegistry {
+class MNN_PUBLIC PassManagerRegistry {
 public:
     static PassManager* GetPassManager(int index);
     static std::vector<PassManager*> GetAllPassManagers();
@@ -21,7 +29,7 @@ public:
     static void AddPassManager(const PassManager& pm);
 };
 
-class RewritePassRegistry {
+class MNN_PUBLIC RewritePassRegistry {
 public:
     RewritePassRegistry(const std::string& name);
 
@@ -34,7 +42,7 @@ private:
     std::string pass_name_;
 };
 
-class RewritePassRegistryHelper {
+class MNN_PUBLIC RewritePassRegistryHelper {
 public:
     RewritePassRegistryHelper(const std::string& name)
         : registry_(new RewritePassRegistry(name)) {}

@@ -27,21 +27,25 @@ Session::Session(Schedule::ScheduleInfo&& info, Interpreter::SessionMode callBac
         mValid = false;
         return;
     }
-    Backend::Info defaultInfo;
-    defaultInfo.type      = MNN_FORWARD_CPU;
-    defaultInfo.numThread = 1;
-    mTensors              = std::move(info.allTensors);
+    mTensors       = std::move(info.allTensors);
+    auto defaultBn = std::move(info.defaultBackend);
     for (auto& iter : info.pipelineInfo) {
         auto rt    = mRuntime.first.find(iter.first.type)->second.get();
         auto cpuRuntime = mRuntime.second;
-        std::shared_ptr<Backend> first(rt->onCreate());
+        bool specialUsage = false;
+        if (iter.first.user != nullptr) {
+            specialUsage = iter.first.user->flags > 0;
+        }
+        std::shared_ptr<Backend> first(rt->onCreate(iter.first.user));
         std::shared_ptr<Backend> second;
-        if (first->type() == MNN_FORWARD_CPU) {
+        if (first->type() == MNN_FORWARD_CPU && (!specialUsage)) {
             second = first;
         } else {
-            second.reset(cpuRuntime->onCreate());
+            BackendConfig defaultConfig;
+            defaultConfig.flags = 4;
+            second.reset(cpuRuntime->onCreate(&defaultConfig));
         }
-        std::shared_ptr<Pipeline> newPipeline(new Pipeline(std::move(iter.second), first, second, inputMode == Interpreter::Session_Input_Inside, rt->onGetCompilerType() == Runtime::Compiler_Geometry));
+        std::shared_ptr<Pipeline> newPipeline(new Pipeline(std::move(iter.second), first, second, defaultBn, inputMode == Interpreter::Session_Input_Inside, rt->onGetCompilerType()));
         mPipelines.emplace_back(std::move(newPipeline));
     }
     mInputs       = std::move(info.inputTensors);
@@ -51,7 +55,7 @@ Session::Session(Schedule::ScheduleInfo&& info, Interpreter::SessionMode callBac
 
 Session::~Session() {
     for (auto& t : mTensors) {
-        TensorUtils::clearHandleData(t.second.get());
+        TensorUtils::clearHandleData(t.get());
     }
     mPipelines.clear();
     mRuntime.first.clear();
@@ -116,8 +120,11 @@ ErrorCode Session::runWithCallBack(const TensorCallBackWithInfo& before, const T
 
 void Session::_clearCache() {
     for (auto& t : mTensors) {
-        auto describe = TensorUtils::getDescribe(t.second.get());
-        TensorUtils::clearHandleData(t.second.get());
+        auto describe = TensorUtils::getDescribe(t.get());
+        if (describe->usage == Tensor::InsideDescribe::TRAINABLE || describe->usage == Tensor::InsideDescribe::CONSTANT) {
+            continue;
+        }
+        TensorUtils::clearHandleData(t.get());
         describe->useCount = 0;
         describe->backend  = nullptr;
         describe->regions.clear();
@@ -125,28 +132,36 @@ void Session::_clearCache() {
 }
 
 ErrorCode Session::resize(bool isStatic) {
-    for (auto& iter : mRuntime.first) {
-        iter.second->onGabageCollect(100);
-    }
-    if (!isStatic) {
-        _clearCache();
-    }
-    bool debug = mCallBackMode == Interpreter::Session_Debug;
-    // Turn Pipeline to Command Buffer and Malloc resource
-    // TODO: Seperate Schedule and Malloc
-    for (auto& iter : mPipelines) {
-        auto error = iter->encode(isStatic);
-        if (NO_ERROR != error) {
-            return error;
+    if (mNeedResize) {
+        if (!isStatic) {
+            _clearCache();
         }
-        error = iter->allocMemory(debug);
-        if (NO_ERROR != error) {
-            return error;
+        bool debug = mCallBackMode == Interpreter::Session_Debug;
+        for (auto& iter : mPipelines) {
+            auto error = iter->encode(isStatic, debug);
+            if (NO_ERROR != error) {
+                return error;
+            }
         }
+        mNeedResize = false;
+        mNeedMalloc = true;
     }
-    mNeedResize = false;
-    for (auto& iter : mRuntime.first) {
-        iter.second->onGabageCollect(0);
+    if (mNeedMalloc) {
+        // Set needResize = true for easy for judge in runSession when error
+        mNeedResize = true;
+        // Turn Pipeline to Command Buffer and Malloc resource
+        // TODO: Seperate Schedule and Malloc
+        for (auto& iter : mPipelines) {
+            auto error = iter->allocMemory();
+            if (NO_ERROR != error) {
+                return error;
+            }
+        }
+        for (auto& iter : mRuntime.first) {
+            iter.second->onGabageCollect(0);
+        }
+        mNeedMalloc = false;
+        mNeedResize = false;
     }
     return NO_ERROR;
 }
@@ -156,9 +171,28 @@ bool Session::getInfo(Interpreter::SessionInfoCode code, void* ptr) const {
             auto dst     = (float*)ptr;
             float summer = mRuntime.second->onGetMemoryInMB();
             for (auto& r : mRuntime.first) {
-                summer += r.second->onGetMemoryInMB();
+                if (r.second.get() != mRuntime.second.get()) {
+                    summer += r.second->onGetMemoryInMB();
+                }
             }
             *dst = summer;
+            return true;
+        } break;
+        case Interpreter::BACKENDS: {
+            int pos = 0;
+            auto res = (int32_t*)ptr;
+            for (auto& r : mRuntime.first) {
+                res[pos++] = r.first;
+            }
+            return true;
+        } break;
+        case Interpreter::FLOPS: {
+            float flo = 0.0f;
+            for (auto& iter : mPipelines) {
+                flo += iter->flops();
+            }
+            auto dst     = (float*)ptr;
+            *dst = flo;
             return true;
         } break;
         // TODO: Support other debug info
@@ -228,7 +262,7 @@ ErrorCode Session::updateToModel(Net* net) const {
         if (blob->dataType() != DataType_DT_FLOAT) {
             continue;
         }
-        std::shared_ptr<Tensor> tensor = mTensors[index].second;
+        std::shared_ptr<Tensor> tensor = mTensors[index];
         if (tensor->host<void>() == nullptr && tensor->deviceId() != 0) {
             tensor.reset(Tensor::createHostTensorFromDevice(tensor.get(), true));
             if (tensor.get() == nullptr) {

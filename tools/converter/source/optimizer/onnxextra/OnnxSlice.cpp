@@ -86,13 +86,23 @@ public:
         // Use TF's stridedslice, turn onnx slice attribute to tf format
         auto rank = _Unsqueeze(_Rank(input), {0});
         if (nullptr != axisVar) {
+            auto axisPtr = axisVar->readMap<int>();
+            if (nullptr != axisPtr) {
+                if (0 > axisPtr[0]) {
+                    axisVar = axisVar + _Rank(input);
+                }
+            }
+            auto axisVarScatter = _Unsqueeze(axisVar, {1});
+            if (nullptr != axisPtr) {
+                axisVarScatter.fix(VARP::CONSTANT);
+            }
             auto shape      = _Shape(input, true);
             auto defaultVar = _Fill(_Shape(axisVar, true), _Scalar<int>(1));
-            auto mask       = _Scalar<int>(1) - _ScatterNd(axisVar, defaultVar, rank);
-            startVar        = _ScatterNd(axisVar, startVar, rank);
-            endVar          = _ScatterNd(axisVar, endVar, rank) + mask * shape;
+            auto mask       = _Scalar<int>(1) - _ScatterNd(axisVarScatter, defaultVar, rank);
+            startVar        = _ScatterNd(axisVarScatter, startVar, rank);
+            endVar          = _ScatterNd(axisVarScatter, endVar, rank) + mask * shape;
             if (nullptr != strideVar) {
-                strideVar = _ScatterNd(axisVar, strideVar - _Scalar<int>(1), rank) + _Fill(rank, _Scalar<int32_t>(1));
+                strideVar = _ScatterNd(axisVarScatter, strideVar - _Scalar<int>(1), rank) + _Fill(rank, _Scalar<int32_t>(1));
             }
         }
         if (nullptr == strideVar) {
@@ -105,8 +115,6 @@ public:
         sliceOp->type       = OpType_StridedSlice;
         sliceOp->main.type  = OpParameter_StridedSliceParam;
         auto param          = new StridedSliceParamT;
-        param->Index        = DataType_DT_INT32;
-        param->T            = DataType_DT_FLOAT;
         sliceOp->main.value = param;
         return Expr::create(sliceOp.get(), {input, startVar, endVar, strideVar}, expr->outputSize());
     }

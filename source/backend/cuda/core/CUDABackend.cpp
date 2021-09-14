@@ -18,9 +18,9 @@
 namespace MNN {
 namespace CUDA {
 
-static std::once_flag gOnce;
 std::map<OpType, CUDABackend::Creator*>* gCreator() {
     static std::map<OpType, CUDABackend::Creator*>* creators = nullptr;
+    static std::once_flag gOnce;
     std::call_once(gOnce, [&]() { creators = new std::map<OpType, CUDABackend::Creator*>; });
     return creators;
 };
@@ -58,7 +58,12 @@ CUDARuntimeWrapper::CUDARuntimeWrapper(BackendConfig::PrecisionMode precision, B
 CUDARuntimeWrapper::~CUDARuntimeWrapper() {
     // Do nothing
 }
-Backend* CUDARuntimeWrapper::onCreate() const {
+float CUDARuntimeWrapper::onGetMemoryInMB() {
+    auto staticMemoryInMB = mBufferPool->totalSize() / 1024.0f / 1024.0f;
+    return staticMemoryInMB;
+}
+
+Backend* CUDARuntimeWrapper::onCreate(const BackendConfig* config) const {
     return new CUDABackend(mBufferPool, mCUDARuntime);
 }
 
@@ -147,11 +152,8 @@ std::pair<float, bool> CUDABackend::onMeasure(const std::vector<Tensor*>& inputs
         return std::make_pair(0.0f, false);
     }
     const float defaultScheduleTime = 0.05f;
-#ifndef MNN_BUILD_MINI
-    auto flops                      = SizeComputer::computeFlops(op, inputs, outputs);
-#else
+    // FIXME: Compute in future
     auto flops = 0.0f;
-#endif
     auto computeFlops = mCUDARuntime->flops();
     return std::make_pair(defaultScheduleTime + flops / 1024.0f / computeFlops * 1000.0f, true);
 }
@@ -214,28 +216,29 @@ void CUDABackend::onCopyBuffer(const Tensor* srcTensor, const Tensor* dstTensor)
     auto needSize = realSize(srcTensor) * srcTensor->getType().bytes();
     std::shared_ptr<Tensor> srcTempTensor;
     std::shared_ptr<Tensor> dstTempTensor;
-    if (srcDimensionFormat == MNN_DATA_FORMAT_NC4HW4) {
-        srcTempTensor.reset(new Tensor(srcTensor, Tensor::CAFFE, true));
-        MNNCPUCopyBuffer(srcTensor, srcTempTensor.get());
-        srcTensor = srcTempTensor.get();
-    }
-    if (dstDimensionFormat == MNN_DATA_FORMAT_NC4HW4) {
-        dstTempTensor.reset(new Tensor(dstTensor, Tensor::CAFFE, true), [dstTensor](void* ptr) {
-            auto src = (Tensor*)ptr;
-            MNNCPUCopyBuffer(src, dstTensor);
-            delete src;
-        });
-        dstTensor = dstTempTensor.get();
-    }
+    
     if (srcTensor->deviceId() != 0 && dstTensor->deviceId() != 0) {
         mCUDARuntime->memcpy((void*)(dstTensor->deviceId()), (void*)(srcTensor->deviceId()), needSize,
-                             MNNMemcpyDeviceToDevice, true);
+                            MNNMemcpyDeviceToDevice, true);
     }
     if (srcTensor->deviceId() != 0 && dstTensor->deviceId() == 0) {
-        mCUDARuntime->memcpy(dstTensor->host<void>(), (void*)(srcTensor->deviceId()), needSize, MNNMemcpyDeviceToHost,
+        if(srcDimensionFormat != dstDimensionFormat) {
+
+            dstTempTensor.reset(new Tensor(srcTensor, srcTensor->getDimensionType(), true));
+            mCUDARuntime->memcpy(dstTempTensor->host<void>(), (void*)(srcTensor->deviceId()), needSize, MNNMemcpyDeviceToHost,
                              true);
+            MNNCPUCopyBuffer(dstTempTensor.get(), dstTensor);
+        } else {
+            mCUDARuntime->memcpy(dstTensor->host<void>(), (void*)(srcTensor->deviceId()), needSize, MNNMemcpyDeviceToHost,
+                             true);
+        }
     }
     if (srcTensor->deviceId() == 0 && dstTensor->deviceId() != 0) {
+        if (srcDimensionFormat != dstDimensionFormat) {
+            srcTempTensor.reset(new Tensor(dstTensor, dstTensor->getDimensionType(), true));
+            MNNCPUCopyBuffer(srcTensor, srcTempTensor.get());
+            srcTensor = srcTempTensor.get();
+        }
         mCUDARuntime->memcpy((void*)(dstTensor->deviceId()), srcTensor->host<void>(), needSize, MNNMemcpyHostToDevice,
                              true);
     }

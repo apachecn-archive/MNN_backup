@@ -20,8 +20,10 @@ public:
         AutoStorage<float> weightFloat;
         const IDSTQuan* quan;
     };
-    static std::shared_ptr<Int8Common> load(const IDSTQuan* quan, bool forceFloat = false);
+    static std::shared_ptr<Int8Common> load(const IDSTQuan* quan, bool forceFloat = false, bool forceInt8 = false);
     static void getConvParameters(std::shared_ptr<ConvolutionCommon::Int8Common> *quanCommon, const MNN::Convolution2D *conv2d, const float** originWeight, int* originWeightSize);
+    static bool getConvInt8Parameters(const MNN::Convolution2D* conv2d, std::shared_ptr<Int8Common>& quanCommon,
+                                      const int8_t*& weight, int& weightSize, float*& scale, int32_t*& bias, float inputScale, float outputScale, int inputZeroPoint, int outputZeroPoint);
 
     // Return padX, padY
     static std::pair<int, int> convolutionPad(const Tensor* input, const Tensor* output,
@@ -46,6 +48,8 @@ public:
         int32_t ih;
         int32_t ow;
         int32_t oh;
+        int32_t srcZStep;
+        int32_t srcYStep;
     };
 };
 } // namespace MNN

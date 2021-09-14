@@ -10,7 +10,8 @@
 #include "core/OpCommonUtils.hpp"
 #include "core/RuntimeFactory.hpp"
 #include "shape/SizeComputer.hpp"
-#include <unordered_map>
+#include "core/AutoStorage.h"
+
 #ifdef MNN_BUILD_CODEGEN
 #include "OpFuse.hpp"
 #endif
@@ -49,42 +50,7 @@ flatbuffers::Offset<Op> GeometryComputerUtils::makePool(flatbuffers::FlatBufferB
 
 void GeometryComputerUtils::buildConstantTensors(std::vector<Schedule::PipelineInfo>& infos,
                                                  std::shared_ptr<Backend> backupBackend, bool netBufferHold,
-                                                 std::vector<Tensor*>& constTensors,
                                                  std::vector<Tensor*>& midConstTensors) {
-    // Create Const Tensors
-    for (auto& info : infos) {
-        if (info.op->type() != OpType_Const) {
-            continue;
-        }
-        SizeComputer::computeOutputSize(info.op, info.inputs, info.outputs);
-        for (auto t : info.outputs) {
-            TensorUtils::getDescribe(t)->usage = Tensor::InsideDescribe::CONSTANT;
-        }
-        info.type                                        = Schedule::CONSTANT;
-        TensorUtils::getDescribe(info.outputs[0])->usage = Tensor::InsideDescribe::CONSTANT;
-        TensorUtils::setLinearLayout(info.outputs[0]);
-        if (_hasZeroShapeOutput(info)) {
-            continue;
-        }
-        auto parameter                                     = info.op->main_as_Blob();
-        TensorUtils::getDescribe(info.outputs[0])->backend = backupBackend.get();
-        if (netBufferHold && (parameter->dataType() != DataType_DT_HALF)) {
-            // The net buffer will be hold by user, we can directly use it
-            info.outputs[0]->buffer().host = (uint8_t*)OpCommonUtils::blobData(info.op);
-        } else {
-            // The net buffer may be released later, or we can't directly use it (for half we need cast to float)
-            auto res = backupBackend->onAcquireBuffer(info.outputs[0], Backend::STATIC);
-            if (!res) {
-                MNN_ERROR("Error for alloc const in pipeline\n");
-                return;
-            }
-            TensorUtils::getDescribe(info.outputs[0])->backend = backupBackend.get();
-            std::shared_ptr<Execution> exe(backupBackend->onCreate(info.inputs, info.outputs, info.op));
-            exe->onResize(info.inputs, info.outputs);
-            exe->onExecute(info.inputs, info.outputs);
-            constTensors.emplace_back(info.outputs[0]);
-        }
-    }
     // Check Middle Const
     for (auto& info : infos) {
         if (info.op->type() == OpType_Const) {
@@ -95,7 +61,7 @@ void GeometryComputerUtils::buildConstantTensors(std::vector<Schedule::PipelineI
             if (TensorUtils::getDescribe(info.inputs[i])->usage == Tensor::InsideDescribe::CONSTANT) {
                 continue;
             }
-            if (SizeComputer::opNeedContent(info.op->type(), i)) {
+            if (OpCommonUtils::opNeedContent(info.op->type(), i)) {
                 isConst = false;
                 break;
             }
@@ -113,7 +79,11 @@ void GeometryComputerUtils::buildConstantTensors(std::vector<Schedule::PipelineI
         if (info.op->type() == OpType_Const) {
             continue;
         }
-        auto dims = SizeComputer::needInputContent(info.op);
+        if (info.op->type() == OpType_Where && (!netBufferHold)) {
+            // For compability old model
+            continue;
+        }
+        auto dims = SizeComputer::needInputContent(info.op, info.inputs.size());
         for (auto index : dims) {
             if (index < info.inputs.size()) {
                 if (TensorUtils::getDescribe(info.inputs[index])->usage != Tensor::InsideDescribe::CONSTANT) {
@@ -152,9 +122,6 @@ void GeometryComputerUtils::buildConstantTensors(std::vector<Schedule::PipelineI
         }
     }
     for (auto& info : infos) {
-        if (info.op->type() == OpType_Const) {
-            continue;
-        }
         if (info.type == Schedule::CONSTANT) {
             for (auto t : info.outputs) {
                 TensorUtils::getDescribe(t)->usage = Tensor::InsideDescribe::CONSTANT;
@@ -169,20 +136,11 @@ ErrorCode GeometryComputerUtils::shapeComputeAndGeometryTransform(
     CommandBuffer& buffer,
     GeometryComputer::Context& geoContext,
     std::shared_ptr<Backend> backupBackend,
-    bool geometry) {
+    Runtime::CompilerType compileType) {
     /** Size Compute and compute Const Begin */
     GeometryComputer::Context ctx(backupBackend, false);
-    std::unordered_map<const Tensor*, std::string> outputTensorName;
     // Size Compute and compute Const
     for (auto& info : infos) {
-        if (info.op->type() == OpType_Const) {
-            continue;
-        }
-        if (info.op->name() != nullptr) {
-            for (auto t : info.outputs) {
-                outputTensorName.insert(std::make_pair(t, info.op->name()->str()));
-            }
-        }
         auto res = SizeComputer::computeOutputSize(info.op, info.inputs, info.outputs);
         if (!res) {
             MNN_ERROR("Compute Shape Error for %s\n", info.op->name()->c_str());
@@ -204,7 +162,7 @@ ErrorCode GeometryComputerUtils::shapeComputeAndGeometryTransform(
             ctx.clear();
             CommandBuffer tempSrcbuffer;
             CommandBuffer tempDstBuffer;
-            auto geo = GeometryComputer::search(info.op->type());
+            auto geo = GeometryComputer::search(info.op->type(), Runtime::Compiler_Loop);
             {
                 res = geo->compute(info.op, info.inputs, info.outputs, ctx, tempSrcbuffer);
                 if (!res) {
@@ -214,8 +172,8 @@ ErrorCode GeometryComputerUtils::shapeComputeAndGeometryTransform(
             }
             GeometryComputerUtils::makeRaster(tempSrcbuffer, tempDstBuffer, ctx);
             for (auto& c : tempDstBuffer.command) {
-                std::shared_ptr<Execution> exe(backupBackend->onCreate(c.inputs, c.outputs, c.op));
-                if (nullptr == exe) {
+                AutoRelease<Execution> exe(backupBackend->onCreate(c.inputs, c.outputs, c.op));
+                if (nullptr == exe.get()) {
                     MNN_ERROR("Const Folder Error for %s\n", info.op->name()->c_str());
                     return NO_EXECUTION;
                 }
@@ -251,89 +209,23 @@ ErrorCode GeometryComputerUtils::shapeComputeAndGeometryTransform(
     /** Size Compute and compute Const End */
 
     /** Geometry Transform */
-    if (geometry) {
-        CommandBuffer tmpBuffer;
-        for (auto& info : infos) {
-            if (info.type == Schedule::CONSTANT) {
-                continue;
-            }
-            if (_hasZeroShapeOutput(info)) {
-                continue;
-            }
-            auto geo = GeometryComputer::search(info.op->type());
-            {
-                bool res = geo->compute(info.op, info.inputs, info.outputs, geoContext, tmpBuffer);
-                if (!res) {
-                    return NOT_SUPPORT;
-                }
-            }
+    CommandBuffer tmpBuffer;
+    for (auto& info : infos) {
+        if (info.type == Schedule::CONSTANT) {
+            continue;
         }
-        GeometryComputerUtils::makeRaster(tmpBuffer, buffer, geoContext);
-        std::unordered_map<std::string, int> nameIdx;
-        auto getName = [&nameIdx](const std::string& name) {
-            auto iter = nameIdx.find(name);
-            if (iter == nameIdx.end()) {
-                nameIdx[name] = 0;
-                return name;
-            }
-            iter->second += 1;
-            char str[200];
-            sprintf(str, "%s#%d", name.c_str(), iter->second);
-            return std::string(str);
-        };
-        // set name for geometry op
-        for (int i = buffer.command.size() - 1; i >= 0; i--) {
-            auto& cmd = buffer.command[i];
-            // has name, dont deal
-            if (!cmd.name.empty()) {
-                continue;
-            }
-            std::vector<Tensor*> inputs, outputs;
-            if (!cmd.inputs.empty() &&
-                TensorUtils::getDescribe(cmd.inputs[0])->memoryType == Tensor::InsideDescribe::MEMORY_VIRTUAL) {
-                outputs = { cmd.inputs[0], cmd.outputs[0] };
-                for (const auto& r : TensorUtils::getDescribe(cmd.inputs[0])->regions) {
-                    inputs.push_back(r.origin);
-                }
-            } else {
-                inputs = cmd.inputs;
-                outputs = cmd.outputs;
-            }
-
-            std::string name;
-            // set name by output tensor
-            for (const Tensor* t : outputs) {
-                auto iter = outputTensorName.find(t);
-                if (iter != outputTensorName.end()) {
-                    name = getName(iter->second);
-                    cmd.name = name;
-                    break;
-                }
-            }
-            // if input tensor is hidden tensor, set same name
-            if (!name.empty()) {
-                for (const Tensor* t : inputs) {
-                    if (outputTensorName.find(t) == outputTensorName.end()) {
-                        outputTensorName.insert(std::make_pair(t, name));
-                    }
-                }
-            }
+        if (_hasZeroShapeOutput(info)) {
+            continue;
         }
-    } else {
-        for (auto& info : infos) {
-            if (info.type == Schedule::CONSTANT) {
-                continue;
+        auto geo = GeometryComputer::search(info.op->type(), compileType);
+        {
+            bool res = geo->compute(info.op, info.inputs, info.outputs, geoContext, tmpBuffer);
+            if (!res) {
+                return NOT_SUPPORT;
             }
-            if (_hasZeroShapeOutput(info)) {
-                continue;
-            }
-            Command command;
-            command.op = info.op;
-            command.inputs = info.inputs;
-            command.outputs = info.outputs;
-            buffer.command.emplace_back(std::move(command));
         }
     }
+    GeometryComputerUtils::makeRaster(tmpBuffer, buffer, geoContext);
 #ifdef MNN_BUILD_CODEGEN
     // fuse op and codegen
     {
@@ -356,20 +248,20 @@ void GeometryComputerUtils::makeRaster(const CommandBuffer& srcBuffer, CommandBu
         auto type = op->type();
         MNN_ASSERT(OpType_Raster != type);
         for (int i = 0; i < iter.inputs.size(); ++i) {
-            if (!SizeComputer::opNeedContent(type, i)) {
+            if (!OpCommonUtils::opNeedContent(type, i)) {
                 continue;
             }
             auto des = TensorUtils::getDescribe(cmd.inputs[i]);
             MNN_ASSERT(des->tensorArrayAttr == nullptr);
             if (des->memoryType == Tensor::InsideDescribe::MEMORY_VIRTUAL) {
-                cmd.inputs[i] = ctx.getRasterCacheCreateRecurrse(cmd.inputs[i], dstBuffer);
+                ctx.getRasterCacheCreateRecurrse(cmd.inputs[i], dstBuffer);
             }
         }
         dstBuffer.command.emplace_back(std::move(cmd));
     }
     auto& outputs = ctx.pOutputs;
-    while (!ctx.pOutputs.empty()) {
-        ctx.getRasterCacheCreateRecurrse(*ctx.pOutputs.begin(), dstBuffer);
+    for (auto& o : ctx.pOutputs) {
+        ctx.getRasterCacheCreateRecurrse(o, dstBuffer);
     }
 }
 Command GeometryComputerUtils::makeBinary(int type, Tensor* input0, Tensor* input1, Tensor* output) {

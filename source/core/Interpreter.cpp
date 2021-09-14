@@ -18,6 +18,7 @@
 #include "core/Pipeline.hpp"
 #include "core/RuntimeFactory.hpp"
 #include "core/Session.hpp"
+
 namespace MNN {
 
 struct Content {
@@ -31,7 +32,38 @@ struct Content {
     size_t cacheOffset = 0;
     std::string cacheFile;
     std::mutex lock;
+    size_t lastCacheSize = 0;
 };
+
+static void writeCacheFile(const Content *net, std::pair<const void*, size_t> buffer) {
+    FILE* f = fopen(net->cacheFile.c_str(), "wb");
+    if (nullptr == f) {
+        MNN_ERROR("Open %s error\n", net->cacheFile.c_str());
+        return;
+    }
+    // Write key
+    auto tsize = fwrite((const char*)net->buffer.get(), 1, net->cacheOffset, f);
+    if (tsize != net->cacheOffset) {
+        MNN_ERROR("Write %s error\n", net->cacheFile.c_str());
+        return;
+    }
+    // Write Cache
+    static const size_t block = 4096;
+    size_t totalSize          = buffer.second;
+    size_t blockSize          = UP_DIV(totalSize, block);
+    for (size_t i = 0; i < blockSize; ++i) {
+        size_t sta = block * i;
+        size_t fin = std::min(sta + block, totalSize);
+        if (fin > sta) {
+            auto realSize = fwrite((const char*)(buffer.first) + sta, 1, fin - sta, f);
+            if (realSize != fin - sta) {
+                MNN_ERROR("Write %s error\n", net->cacheFile.c_str());
+                return;
+            }
+        }
+    }
+    fclose(f);
+}
 
 Interpreter* Interpreter::createFromFile(const char* file) {
     if (nullptr == file) {
@@ -81,12 +113,14 @@ Interpreter* Interpreter::createFromBufferInternal(Content* net) {
         MNN_PRINT("Buffer is null for create interpreter\n");
         return nullptr;
     }
+#ifndef MNN_BUILD_MINI
     flatbuffers::Verifier verify((const uint8_t*)(net->buffer.get()), net->buffer.size());
     if (false == VerifyNetBuffer(verify)) {
         MNN_PRINT("Invalidate buffer to create interpreter\n");
         delete net;
         return nullptr;
     }
+#endif
     net->net = GetNet(net->buffer.get());
     if (nullptr == net->net->oplists()) {
         MNN_ERROR("Model has no oplist\n");
@@ -139,11 +173,20 @@ void Interpreter::setCacheFile(const char* cacheFile, size_t keySize) {
         MNN_ERROR("Alloc memory for Cache error.\n");
         return;
     }
-    if (0 != ::memcmp(mNet->cacheBuffer.get(), mNet->buffer.get(), mNet->cacheOffset)) {
-        MNN_ERROR("Cache model file key does not match.\n");
-        mNet->cacheBuffer.release();
-        return;
+}
+
+ErrorCode Interpreter::updateCacheFile(Session *session, int flag) {
+    auto buffer = session->getCache();
+    
+    //When current cacheSize bigger than previous, update
+    if (buffer.first != nullptr && buffer.second > mNet->lastCacheSize) {
+        MNN_PRINT("Update cache to %s, size = %zu\n", mNet->cacheFile.c_str(), buffer.second);
+        writeCacheFile(mNet, buffer);
+        mNet->lastCacheSize = buffer.second;
     }
+    // Reset cache
+    session->loadCache(nullptr, 0);
+    return NO_ERROR;
 }
 
 Interpreter::Interpreter(Content* net) {
@@ -180,7 +223,12 @@ Session* Interpreter::createMultiPathSession(const std::vector<ScheduleConfig>& 
         return nullptr;
     }
     std::unique_lock<std::mutex> _l(mNet->lock);
-    auto info           = Schedule::schedule(mNet->net, configs);
+    bool netBufferHold  = mNet->inputMode == Session_Input_User;
+    Schedule::ScheduleInfo info;
+    auto success = Schedule::schedule(info, mNet->net, configs, runtime, netBufferHold);
+    if (!success) {
+        return nullptr;
+    }
     auto validForResize = info.validForResize;
     RuntimeInfo rt = runtime;
     auto newSession =
@@ -194,50 +242,36 @@ Session* Interpreter::createMultiPathSession(const std::vector<ScheduleConfig>& 
     if (mNet->cacheBuffer.get() != nullptr) {
         valid = result->loadCache(mNet->cacheBuffer.get() + mNet->cacheOffset,
                                   mNet->cacheBuffer.size() - mNet->cacheOffset);
+        if(!valid) {
+            // Reset cache
+            result->loadCache(nullptr, 0);
+            MNN_PRINT("Cache invalid, will be reset\n");
+        }
+        
+        mNet->lastCacheSize = mNet->cacheBuffer.size() - mNet->cacheOffset;
     }
     if (validForResize && mNet->inputMode == Session_Input_Inside) {
         result->resize(mNet->net->usage() == Usage_INFERENCE_STATIC);
     }
+    
     if ((!mNet->cacheFile.empty()) && (!valid)) {
         // Try to save extra cache
-        auto res = result->getCache();
-        if (res.first != nullptr && res.second > 0) {
-            do {
-                MNN_PRINT("Write cache to %s, size = %lu\n", mNet->cacheFile.c_str(), res.second);
-                FILE* f = fopen(mNet->cacheFile.c_str(), "wb");
-                if (nullptr == f) {
-                    MNN_ERROR("Open %s error\n", mNet->cacheFile.c_str());
-                    break;
-                }
-                // Write key
-                auto tsize = fwrite((const char*)mNet->buffer.get(), 1, mNet->cacheOffset, f);
-                if (tsize != mNet->cacheOffset) {
-                    MNN_ERROR("Write %s error\n", mNet->cacheFile.c_str());
-                    break;
-                }
-                // Write Cache
-                static const size_t block = 4096;
-                size_t totalSize          = res.second;
-                size_t blockSize          = UP_DIV(totalSize, block);
-                for (size_t i = 0; i < blockSize; ++i) {
-                    size_t sta = block * i;
-                    size_t fin = std::min(sta + block, totalSize);
-                    if (fin > sta) {
-                        auto realSize = fwrite((const char*)(res.first) + sta, 1, fin - sta, f);
-                        if (realSize != fin - sta) {
-                            MNN_ERROR("Write %s error\n", mNet->cacheFile.c_str());
-                            break;
-                        }
-                    }
-                }
-                fclose(f);
-            } while (false);
+        auto buffer = result->getCache();
+        if (buffer.first != nullptr && buffer.second > 0) {
+            MNN_PRINT("Write cache to %s, size = %zu\n", mNet->cacheFile.c_str(), buffer.second);
+            writeCacheFile(mNet, buffer);
+            mNet->lastCacheSize = buffer.second;
         }
     }
     // Reset cache
     result->loadCache(nullptr, 0);
 
     mNet->sessions.emplace_back(std::move(newSession));//lms Net包含Session
+    
+    //for valid cacheFile, maybe need update after resize
+    if(valid) {
+        updateCacheFile(result);
+    }
     return result;
 }
 
@@ -317,9 +351,7 @@ void Interpreter::resizeSession(Session* session) {
         MNN_ERROR("The model buffer has been released. Can't resize session\n");
         return;
     }
-    if (session->getNeedResize()) {
-        session->resize();
-    }
+    session->resize();
 }
 
 ErrorCode Interpreter::runSessionWithCallBack(const Session* session, const TensorCallBack& before,
@@ -344,7 +376,9 @@ const Backend* Interpreter::getBackend(const Session* session, const Tensor* ten
 
 void Interpreter::releaseModel() {
     std::unique_lock<std::mutex> _l(mNet->lock);
-    mNet->buffer.release();
+    if (mNet->buffer.get() != nullptr && mNet->net->usage() != Usage_INFERENCE_STATIC) {
+        mNet->buffer.release();
+    }
     mNet->cacheBuffer.release();
 }
 
@@ -405,20 +439,22 @@ ErrorCode Interpreter::updateSessionToModel(Session* session) {
 bool Interpreter::getSessionInfo(const Session* session, SessionInfoCode code, void* ptr) {
     std::unique_lock<std::mutex> _l(mNet->lock);
     if (nullptr == session || nullptr == ptr) {
-        return true;
+        return false;
     }
     return session->getInfo(code, ptr);
 }
 
-static Runtime* _getDefaultBackend(RuntimeInfo& rt) {
+static void _getDefaultBackend(RuntimeInfo& rt) {
     auto defaultType = MNN_FORWARD_CPU;
+    if (rt.first.find(defaultType) != rt.first.end()) {
+        rt.second = rt.first[defaultType];
+    }
     if (rt.second == nullptr) {
         Backend::Info info;
         info.type      = defaultType;
         info.numThread = 1;
         rt.second.reset(RuntimeFactory::create(info));
     }
-    return rt.second.get();
 }
 RuntimeInfo Interpreter::createRuntime(const std::vector<ScheduleConfig>& configs) {
     RuntimeInfo res;
@@ -436,8 +472,8 @@ RuntimeInfo Interpreter::createRuntime(const std::vector<ScheduleConfig>& config
             }
             mRuntimes[compute.type].reset(newBn);
         }
-        _getDefaultBackend(res);
     }
+    _getDefaultBackend(res);
     return res;
 }
 

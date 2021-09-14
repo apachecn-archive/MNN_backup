@@ -7,22 +7,17 @@
 //
 
 #include "MNN_generated.h"
-#include "caffeConverter.hpp"
-#include "liteConverter.hpp"
-#include "onnxConverter.hpp"
-#include "tensorflowConverter.hpp"
 #include <MNN/expr/Expr.hpp>
 #include <MNN/expr/Module.hpp>
 #include <MNN/expr/ExprCreator.hpp>
 #include "PostConverter.hpp"
 #include "rapidjson/document.h"
-#include "options.hpp"
 #include <fstream>
 #include <sstream>
 #include <cmath>
-#include "config.hpp"
-#include "common/Global.hpp"
+#include "cli.hpp"
 using namespace MNN::Express;
+using namespace MNN;
 
 static bool compareOutput(VARP output, const std::string& directName, const std::string& name, Dimensionformat dataFormat, int order) {
     auto info = output->getInfo();
@@ -44,7 +39,7 @@ static bool compareOutput(VARP output, const std::string& directName, const std:
         outputFileOs << directName << "/" << order <<".txt";
         outputOrigin.open(outputFileOs.str().c_str());
     }
-    if (info->order == NC4HW4) {
+    if (info->order == NC4HW4 && info->dim.size() > 1) {
         output = _Convert(output, dataFormat);
         info = output->getInfo();
     }
@@ -52,12 +47,18 @@ static bool compareOutput(VARP output, const std::string& directName, const std:
         output = _Cast<float>(output);
         info = output->getInfo();
     }
+    MNN_PRINT("%s: (", name.c_str());
+    for (int i=0; i<info->dim.size(); ++i) {
+        MNN_PRINT("%d, ", info->dim[i]);
+    }
+    MNN_PRINT(")\n");
     auto targetValue = _Input({info->dim}, info->order, info->type);
     auto targetPtr = targetValue->writeMap<float>();
     for (int i=0; i<info->size; ++i) {
         outputOrigin >> targetPtr[i];
     }
     auto absMax = _ReduceMax(_Abs(targetValue), {});
+    absMax = _Maximum(absMax, _Scalar<float>(0.0001f));
     auto diff = _Abs(targetValue - output);
     auto diffAbsMax = _ReduceMax(diff);
     auto absMaxV = absMax->readMap<float>()[0];
@@ -70,43 +71,37 @@ static bool compareOutput(VARP output, const std::string& directName, const std:
 }
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        MNN_ERROR("Usage: ./TestConvertResult [Onnx, Tf] ${Dir}\n");
+        MNN_ERROR("Usage: ./TestConvertResult [Onnx, Tf, Tflite, Torch] ${Dir}\n");
         return 0;
     }
     std::string inputType = argv[1];
     std::string directName = argv[2];
     auto inputModel = modelConfig::ONNX;
-    auto converter = onnx2MNNNet;
     auto suffix = ".onnx";
     auto dataFormat = NCHW;
     if (inputType == "Tf") {
         inputModel = modelConfig::TENSORFLOW;
-        converter = tensorflow2MNNNet;
         suffix = ".pb";
         dataFormat = NHWC;
+    } else if (inputType == "Tflite") {
+        inputModel = modelConfig::TFLITE;
+        suffix = ".tflite";
+        dataFormat = NHWC;
+    } else if (inputType == "Torch") {
+        inputModel = modelConfig::TORCH;
+        suffix = ".pt";
     }
     MNN_PRINT("Test %s\n", directName.c_str());
     std::string defaultCacheFile = ".___temp.mnn";
     {
         modelConfig modelPath;
         modelPath.model = inputModel;
-        Global<modelConfig>::Reset(&modelPath);
-
-        auto options = common::DefaultOptions();
         std::ostringstream modelNameOs;
         modelNameOs << directName << "/test" << suffix;
-        std::unique_ptr<MNN::NetT> netT = std::unique_ptr<MNN::NetT>(new MNN::NetT());
-        converter(modelNameOs.str().c_str(), "Test", options, netT);
-        std::unique_ptr<MNN::NetT> newNet = optimizeNet(netT, false);
-        flatbuffers::FlatBufferBuilder builderOutput(1024);
-        builderOutput.ForceDefaults(true);
-        auto len = MNN::Net::Pack(builderOutput, newNet.get());
-        builderOutput.Finish(len);
-        int sizeOutput    = builderOutput.GetSize();
-        auto bufferOutput = builderOutput.GetBufferPointer();
-
-        std::ofstream output(defaultCacheFile.c_str(), std::ofstream::binary);
-        output.write((const char*)bufferOutput, sizeOutput);
+        modelPath.modelFile = modelNameOs.str();
+        modelPath.MNNModel = defaultCacheFile;
+        modelPath.keepInputFormat = true;
+        Cli::convertModel(modelPath);
     }
     bool useControlFlow = false;
     rapidjson::Document document;
@@ -223,27 +218,24 @@ int main(int argc, char *argv[]) {
             auto output = outputs[i];
             bool success = compareOutput(output, directName, outputNames[i], dataFormat, i);
             if (!success) {
+                varMap[outputNames[i]] = _Clone(output, true);
+                modelError = true;
+            }
+        }
+    } else {
+        // Expr Branch
+        for (int i=0; i<outputNames.size(); ++i) {
+            auto name = outputNames[i];
+            if (varMap.find(name) == varMap.end()) {
+                MNN_ERROR("TESTERROR, Can't find var: %s\n", name.c_str());
+                return 0;
+            }
+            auto output = varMap[name];
+            bool success = compareOutput(output, directName, name, dataFormat, i);
+            if (!success) {
                 modelError = true;
                 break;
             }
-        }
-        if (!modelError) {
-            MNN_PRINT("TEST_SUCCESS\n");
-        }
-        return 0;
-    }
-    // Expr Branch
-    for (int i=0; i<outputNames.size(); ++i) {
-        auto name = outputNames[i];
-        if (varMap.find(name) == varMap.end()) {
-            MNN_ERROR("TESTERROR, Can't find var: %s\n", name.c_str());
-            return 0;
-        }
-        auto output = varMap[name];
-        bool success = compareOutput(output, directName, name, dataFormat, i);
-        if (!success) {
-            modelError = true;
-            break;
         }
     }
     if (modelError) {
@@ -251,14 +243,19 @@ int main(int argc, char *argv[]) {
         MNN_ERROR("Save mnn result to  .error director\n");
         for (int i=0; i<outputNames.size(); ++i) {
             auto name = outputNames[i];
+            if (varMap.find(name) == varMap.end()) {
+                continue;
+            }
             auto v = varMap[name];
             auto info = v->getInfo();
-            if (info->order == NC4HW4) {
-                v = _Convert(v, NCHW);
+            if (nullptr == info) {
+                continue;
+            }
+            if (info->order == NC4HW4 && info->dim.size() > 1) {
+                v = _Convert(v, dataFormat);
             }
             if (info->type.code != halide_type_float) {
                 v = _Cast<float>(v);
-                info = v->getInfo();
             }
             v.fix(VARP::CONSTANT);
             info = v->getInfo();

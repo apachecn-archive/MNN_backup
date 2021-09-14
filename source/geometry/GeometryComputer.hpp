@@ -10,10 +10,10 @@
 #define GeometryComputer_hpp
 #include <map>
 #include <vector>
-#include <set>
 #include "MNN_generated.h"
 #include "core/Command.hpp"
 #include "core/TensorUtils.hpp"
+#include "core/Backend.hpp"
 
 namespace MNN {
 class GeometryComputer {
@@ -23,7 +23,7 @@ public:
     }
     class MNN_PUBLIC Context {
     public:
-        Context(std::shared_ptr<Backend> allocBackend, bool permitVirtual = true);
+        Context(std::shared_ptr<Backend> allocBackend, bool permitVirtual = true, MNNForwardType = MNN_FORWARD_CPU);
         ~Context();
 
         void clear();
@@ -31,25 +31,30 @@ public:
         bool supportVirtual() const {
             return mPermitVirtual;
         }
-        Tensor* getRasterCacheCreateRecurrse(Tensor* src, CommandBuffer& cmd);
-        const std::vector<std::shared_ptr<Tensor>>& searchConst(const Op* op) const;
+        void getRasterCacheCreateRecurrse(Tensor* src, CommandBuffer& cmd);
+
+        // If has cache, return. Otherwise create cache
+        const std::vector<std::shared_ptr<Tensor>>& searchConst(const Op* op);
         std::shared_ptr<Tensor> allocConst(const Op* key, const std::vector<int>& shape, halide_type_t type,
                                            Tensor::DimensionType dimType = Tensor::TENSORFLOW);
-        std::set<Tensor*> pOutputs;
+        bool allocTensor(Tensor* tenosr);
+        std::vector<Tensor*> pOutputs;
+        inline MNNForwardType forwardType() const {
+            return mForwardType;
+        }
     private:
-        Tensor* getRasterCacheCreate(Tensor* src, CommandBuffer& cmd);
-        std::shared_ptr<Tensor> getCachedTensor(Tensor* t);
-        std::map<Tensor*, std::shared_ptr<Tensor>> mRasterCache;
+        void getRasterCacheCreate(Tensor* src, CommandBuffer& cmd);
         std::map<const Op*, std::vector<std::shared_ptr<Tensor>>> mConstTensors;
         std::vector<std::shared_ptr<Tensor>> mEmpty;
+        std::vector<std::shared_ptr<Tensor>> mTempConstTensors;
         bool mPermitVirtual;
         std::shared_ptr<Backend> mBackend;
         std::vector<uint8_t> mRasterOp;
+        MNNForwardType mForwardType;
     };
     static void init();
-    MNN_PUBLIC static const GeometryComputer* search(int type);
-    static Command makeRaster(Tensor* input, Tensor* output);
-    static void registerGeometryComputer(std::shared_ptr<GeometryComputer> comp, std::vector<int> type);
+    MNN_PUBLIC static const GeometryComputer* search(int opType, Runtime::CompilerType compType);
+    static void registerGeometryComputer(std::shared_ptr<GeometryComputer> comp, std::vector<int> type, Runtime::CompilerType compType = Runtime::Compiler_Geometry);
     MNN_PUBLIC bool compute(const Op* op, const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
                             Context& context, CommandBuffer& cmd) const;
 

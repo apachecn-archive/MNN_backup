@@ -12,6 +12,7 @@
 #include "Utils.hpp"
 #include <MNN/AutoTime.hpp>
 #include "core/WrapExecution.hpp"
+#include "core/OpCommonUtils.hpp"
 #include "geometry/GeometryComputerUtils.hpp"
 #include <MNN/expr/ExecutorScope.hpp>
 #ifdef MNN_EXPR_ENABLE_PROFILER
@@ -127,10 +128,10 @@ Executor::Requirement Executor::getRequirement(Expr* expr) const {
         return req;
     }
     for (int i = 0; i < inputSize; ++i) {
-        req.contentNeedContent[i] = SizeComputer::opNeedContent(op->type(), i);
+        req.contentNeedContent[i] = OpCommonUtils::opNeedContent(op->type(), i);
         req.shapeNeedContent[i]   = false;
     }
-    auto needIndexId = SizeComputer::needInputContent(op);
+    auto needIndexId = SizeComputer::needInputContent(op, inputSize);
     for (auto index : needIndexId) {
         if (index < req.shapeNeedContent.size()) {
             req.shapeNeedContent[index] = true;
@@ -144,6 +145,10 @@ std::shared_ptr<Executor> Executor::getGlobalExecutor() {
     static std::shared_ptr<Executor> gExecutor;
     std::call_once(gInitFlag, [&]() {
         auto creator = MNNGetExtraRuntimeCreator(MNN_FORWARD_CPU);
+#ifdef MNN_BUILD_MINI
+        SizeComputerSuite::init();
+        GeometryComputer::init();
+#endif
         Backend::Info info;
         info.type = MNN_FORWARD_CPU;
         info.numThread = 1;
@@ -160,6 +165,7 @@ std::shared_ptr<Executor> Executor::newExecutor(MNNForwardType type,
     Backend::Info info;
     info.type = type;
     info.numThread = numberThread;
+    info.user = const_cast<BackendConfig*>(&config);
     std::shared_ptr<Runtime> bn(creator->onCreate(info));
     return std::shared_ptr<Executor>(new Executor(bn, type));
 }
@@ -229,6 +235,7 @@ private:
     CommandBuffer mCmdBuffer;
     std::vector<std::shared_ptr<Execution>> mExecutions;
     std::map<const Op*, std::shared_ptr<Execution>> mCacheExes;
+    Runtime::CompilerType mCompilerType;
 };
 void Executor::setShapeDirty(ComputeCache* cache) {
     cache->setShapeDirty();
@@ -275,7 +282,7 @@ void Executor::ComputeCache::setContentDirty() {
     mContentDirty = true;
 }
 
-Executor::ComputeCache::ComputeCache(std::shared_ptr<Backend> backend, std::shared_ptr<Backend> backupBackend) : mContext(backupBackend) {
+Executor::ComputeCache::ComputeCache(std::shared_ptr<Backend> backend, std::shared_ptr<Backend> backupBackend) : mContext(backupBackend, true, backend->type()) {
     mBackend = backend;
     mBackupBackend = backupBackend;
 }
@@ -414,7 +421,7 @@ ErrorCode Executor::ComputeCache::resize() {
             {
             Timer autoTime;
 #endif
-            auto geo = GeometryComputer::search(iter.op->type());
+            auto geo = GeometryComputer::search(iter.op->type(), mCompilerType);
             geo->compute(iter.op, iter.inputs, iter.outputs, mContext, buffer);
 #ifdef MNN_EXPR_ENABLE_PROFILER
             float costTime = (float)autoTime.durationInUs() / (float)1000;
@@ -440,7 +447,7 @@ ErrorCode Executor::ComputeCache::resize() {
             op = flatbuffers::GetMutableRoot<Op>(cmd.buffer.data());
         }
         for (auto v = 0; v<cmd.inputs.size(); ++v) {
-            if (!SizeComputer::opNeedContent(op->type(), v)) {
+            if (!OpCommonUtils::opNeedContent(op->type(), v)) {
                 continue;
             }
             auto des = TensorUtils::getDescribe(cmd.inputs[v]);
@@ -495,33 +502,16 @@ ErrorCode Executor::ComputeCache::resize() {
         auto bn = mExecutions[k]->backend();
         auto iterType = bn->type();
         for (int i=0; i<cmd.inputs.size(); ++i) {
-            if (!SizeComputer::opNeedContent(op->type(), i)) {
+            if (!OpCommonUtils::opNeedContent(op->type(), i)) {
                 continue;
             }
             auto inpDes = TensorUtils::getDescribe(cmd.inputs[i]);
             if (inpDes->memoryType == Tensor::InsideDescribe::MEMORY_VIRTUAL) {
                 for (auto& reg : inpDes->regions) {
-                    auto orgDes = TensorUtils::getDescribe(reg.origin);
-                    auto tensorBn = orgDes->backend;
-                    auto type = MNN_FORWARD_CPU;
-                    if (nullptr != tensorBn) {
-                        type = tensorBn->type();
-                    }
-                    if (iterType != type) {
-                        needWrap = true;
-                        break;
-                    }
+                    needWrap = needWrap || WrapExecution::needWrap(reg.origin, bn);
                 }
             } else {
-                auto tensorBn = inpDes->backend;
-                auto type = MNN_FORWARD_CPU;
-                if (nullptr != tensorBn) {
-                    type = tensorBn->type();
-                }
-                if (iterType != type) {
-                    needWrap = true;
-                    break;
-                }
+                needWrap = needWrap || WrapExecution::needWrap(cmd.inputs[i], bn);
             }
             if (needWrap) {
                 break;
@@ -550,7 +540,7 @@ ErrorCode Executor::ComputeCache::resize() {
             return code;
         }
         for (auto v = 0; v<cmd.inputs.size(); ++v) {
-            if (!SizeComputer::opNeedContent(op->type(), v)) {
+            if (!OpCommonUtils::opNeedContent(op->type(), v)) {
                 continue;
             }
             auto t = cmd.inputs[v];
@@ -633,14 +623,17 @@ void Executor::_create(const std::vector<EXPRP>& outputs, std::set<std::shared_p
     //MNN_PRINT("Create %p begin\n", packed[0].get());
     std::shared_ptr<Backend> cacheBn;
     std::shared_ptr<Backend> cacheBackupBn;
+    BackendConfig defaultConfig;
+    defaultConfig.flags = 4;
     if (forceCPU) {
-        cacheBn.reset(mBackupRuntime.first->onCreate());
+        cacheBn.reset(mBackupRuntime.first->onCreate(&defaultConfig));
         cacheBackupBn = cacheBn;
     } else {
         cacheBn.reset(mRuntime.first->onCreate());
-        cacheBackupBn.reset(mBackupRuntime.first->onCreate());
+        cacheBackupBn.reset(mBackupRuntime.first->onCreate(&defaultConfig));
     }
     std::shared_ptr<ComputeCache> packedCache(new ComputeCache(cacheBn, cacheBackupBn));
+    packedCache->mCompilerType = mRuntime.first->onGetCompilerType();
     packedCache->mInputs = std::move(inputCaches);
     packedCache->mInputInside = std::move(inputNode);
     for (auto expr : packed) {

@@ -5,18 +5,21 @@
 //  Created by MNN on 2019/01/31.
 //  Copyright © 2018, Alibaba Group Holding Limited
 //
+#if defined(__ANDROID__) || defined(__aarch64__)
 
-#ifdef __aarch64__
-
+#include "half.hpp"
 #include <algorithm>
 #include <mutex>
 
-#include "backend/arm82/Arm82Backend.hpp"
-#include "backend/arm82/Arm82OptFunc.hpp"
+#include "Arm82Backend.hpp"
+#include "Arm82OptFunc.hpp"
+#include "Arm82Functions.hpp"
 #include "core/BufferAllocator.hpp"
 #include "core/TensorUtils.hpp"
-
-#include "half.hpp"
+#include "core/OpCommonUtils.hpp"
+#include "backend/cpu/compute/CommonOptFunction.h"
+#include "backend/cpu/CPUTensorConvert.hpp"
+#include "backend/cpu/CPURaster.hpp"
 
 namespace MNN {
 
@@ -37,8 +40,8 @@ bool Arm82Backend::addArm82Creator(OpType t, Arm82Creator* ct) {
     return true;
 }
 
-Arm82Backend::Arm82Backend(const CPURuntime* runtime) : CPUBackend(runtime, MNN_FORWARD_CPU_EXTENSION) {
-    // nothing to do
+Arm82Backend::Arm82Backend(const CPURuntime* runtime) : CPUBackend(runtime, BackendConfig::Precision_Low, MNN_FORWARD_CPU_EXTENSION) {
+    mCoreFunctions = Arm82Functions::get();
 }
 
 Arm82Backend::~Arm82Backend() {
@@ -51,6 +54,14 @@ Execution* Arm82Backend::onCreate(const std::vector<Tensor*>& inputs, const std:
         if (t->getType().code != halide_type_float) {
             return nullptr;
         }
+    }
+    auto quantInfo = OpCommonUtils::getQuantInfo(inputs);
+    if (quantInfo.first) {
+        return nullptr;
+    }
+    bool originCreate = OpCommonUtils::opCompabilityForLowp(op);
+    if (originCreate) {
+        return CPUBackend::onCreate(inputs, outputs, op);
     }
     auto creatorContainer = getArm82CreatorContainer();
     // MNN_PRINT("====> create Execution for type: %s\n", MNN::EnumNameOpType(op->type()));
@@ -88,7 +99,7 @@ bool Arm82Backend::onAcquireBuffer(const Tensor* nativeTensor, StorageType stora
     // arm82 backend tensor data type is fp16 default
     auto tensor = const_cast<Tensor*>(nativeTensor);
     auto& buffer = tensor->buffer();
-    if (buffer.type != halide_type_of<float>()) {
+    if (buffer.type != halide_type_of<float>() && buffer.type != halide_type_of<FLOAT16>()) {
         return CPUBackend::onAcquireBuffer(nativeTensor, storageType);
     }
     auto res = allocBuffer(_getAliginSize(buffer, TensorUtils::getDescribe(nativeTensor)->dimensionFormat), (Tensor*)nativeTensor, storageType);
@@ -98,52 +109,6 @@ bool Arm82Backend::onAcquireBuffer(const Tensor* nativeTensor, StorageType stora
     // Set mask in device for easy to determine
     buffer.device = 1;
     return true;
-}
-static void _convertFp16Inside(const halide_buffer_t& ib, const halide_buffer_t& ob, MNN_DATA_FORMAT source, MNN_DATA_FORMAT dest) {
-    int area    = 1;
-    int channel = 0;
-    if (source == dest) {
-        ::memcpy(ob.host, ib.host, _getAliginSize(ib, source));
-        return;
-    }
-    if (source == MNN_DATA_FORMAT_NC4HW4 || source == MNN_DATA_FORMAT_NCHW) {
-        channel = ib.dim[1].extent;
-        for (int axis = 2; axis < ib.dimensions; ++axis) {
-            area *= ib.dim[axis].extent;
-        }
-    } else {
-        channel = ib.dim[ib.dimensions - 1].extent;
-        for (int axis = 1; axis < ib.dimensions - 1; ++axis) {
-            area *= ib.dim[axis].extent;
-        }
-    }
-
-    // external use
-    // copy between user and Arm82Backend
-    // fp16 fp32 transformation
-    const int batch = ib.dim[0].extent;
-
-    if (source == MNN_DATA_FORMAT_NC4HW4 && dest == MNN_DATA_FORMAT_NCHW) {
-        const int inbatchStride = UP_DIV(channel, ARMV82_CHANNEL_UNIT) * area * ARMV82_CHANNEL_UNIT;
-        const int outBatchStide = channel * area;
-
-        for (int i = 0; i < batch; ++i) {
-            MNNNC8HW8TONCHW_NO_TYPE((uint16_t*)ob.host + outBatchStide * i, (const uint16_t*)ib.host + inbatchStride * i, area,
-                            channel);
-        }
-        return;
-    }
-
-    if (source == MNN_DATA_FORMAT_NCHW && dest == MNN_DATA_FORMAT_NC4HW4) {
-        const int inbatchStride = channel * area;
-        const int outBatchStide = UP_DIV(channel, ARMV82_CHANNEL_UNIT) * area * ARMV82_CHANNEL_UNIT;
-        for (int i = 0; i < batch; ++i) {
-            MNNNCHWTONC8HW8_NO_TYPE((uint16_t*)ob.host + outBatchStide * i, (const uint16_t*)ib.host + inbatchStride * i, area,
-                            channel);
-        }
-        return;
-    }
-    MNN_ERROR("Invalide format %d - %d copy for intenal Arm82 Backend\n", source, dest);
 }
 void Arm82Backend::onCopyBuffer(const Tensor* srcTensor, const Tensor* dstTensor) const {
     auto& ib     = srcTensor->buffer();
@@ -166,7 +131,7 @@ void Arm82Backend::onCopyBuffer(const Tensor* srcTensor, const Tensor* dstTensor
         if (srcType == MNN_FORWARD_CPU) {
             MNNCPUCopyBuffer(srcTensor, dstTensor);
         } else {
-            _convertFp16Inside(ib, ob, source, dest);
+            CPUTensorConverter::convert(srcTensor, dstTensor, mCoreFunctions);
         }
         return;
     }
@@ -197,19 +162,11 @@ void Arm82Backend::onCopyBuffer(const Tensor* srcTensor, const Tensor* dstTensor
         }
         const int batch = srcTensor->length(0);
         if (srcType == MNN_FORWARD_CPU) {
-            const int outBatchStride = UP_DIV(channel, ARMV82_CHANNEL_UNIT) * area * ARMV82_CHANNEL_UNIT;
-            const int inbatchStride = UP_DIV(channel, 4) * area * 4;
-            for (int i = 0; i < batch; ++i) {
-                MNNNC4HW4TONC8HW8(dstTensor->host<uint16_t>() + outBatchStride * i, srcTensor->host<float>() + inbatchStride * i, area,
+            MNNNC4HW4TONC8HW8(dstTensor->host<FLOAT16>(), srcTensor->host<float>(), area * batch,
                                 channel);
-            }
         } else {
-            const int inbatchStride = UP_DIV(channel, ARMV82_CHANNEL_UNIT) * area * ARMV82_CHANNEL_UNIT;
-            const int outBatchStide = UP_DIV(channel, 4) * area * 4;
-            for (int i = 0; i < batch; ++i) {
-                MNNNC8HW8TONC4HW4(dstTensor->host<float>() + outBatchStide * i, srcTensor->host<uint16_t>() + inbatchStride * i, area,
+            MNNNC8HW8TONC4HW4(dstTensor->host<float>(), srcTensor->host<FLOAT16>(), area * batch,
                                 channel);
-            }
         }
         return;
     }
@@ -220,15 +177,15 @@ void Arm82Backend::onCopyBuffer(const Tensor* srcTensor, const Tensor* dstTensor
     // cpu -> arm82 copy
     if (srcType == MNN_FORWARD_CPU) {
         const auto src = srcTensor->host<float>();
-        auto dst       = dstTensor->host<FLOAT16>();
-        MNNQuantizeFP16(dst, src, elemenSize);
+        auto dst       = dstTensor->host<int16_t>();
+        MNNQuantizeFP16(src, dst, elemenSize);
         return;
     }
     // arm82 -> cpu copy
     if (srcType == MNN_FORWARD_CPU_EXTENSION) {
         const auto src = srcTensor->host<int16_t>();
         auto dst       = dstTensor->host<float>();
-        MNNDequantizeFP16(dst, src, elemenSize);
+        MNNDequantizeFP16(src, dst, elemenSize);
         return;
     }
     MNN_ERROR("Invalide copy for intenal Arm82 Backend\n");
@@ -236,6 +193,7 @@ void Arm82Backend::onCopyBuffer(const Tensor* srcTensor, const Tensor* dstTensor
 }
 
 void registerArm82RuntimeCreator() {
+    Arm82Functions::init();
     registerArm82Ops();
 };
 #ifndef MNN_CODEGEN_REGISTER
@@ -246,5 +204,4 @@ static const auto __arm82_global_initializer = []() {
 #endif
 
 } // namespace MNN
-
 #endif

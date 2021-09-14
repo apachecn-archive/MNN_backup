@@ -30,7 +30,7 @@ int main(int argc, const char* argv[]) {
     if (rslash != std::string::npos) {
         pwd = cmd.substr(0, rslash + 1);
     }
-    
+
     // read args
     const char* fileName = argv[1];
     int runTime          = 100;
@@ -42,7 +42,7 @@ int main(int argc, const char* argv[]) {
         type = (MNNForwardType)atoi(argv[3]);
         printf("Use extra forward type: %d\n", type);
     }
-    
+
     // input dims
     std::vector<int> inputDims;
     if (argc > 4) {
@@ -64,13 +64,24 @@ int main(int argc, const char* argv[]) {
         MNN_PRINT("%d ", dim);
     }
     MNN_PRINT("\n");
-    
+    int threadNumber = 4;
+    if (argc > 5) {
+        threadNumber = ::atoi(argv[5]);
+        MNN_PRINT("Set ThreadNumber = %d\n", threadNumber);
+    }
+
+    float sparsity = 0.0f;
+    if(argc >= 8) {
+        sparsity = atof(argv[7]);
+    }
+
+
     // revert MNN model if necessary
     auto revertor = std::unique_ptr<Revert>(new Revert(fileName));
-    revertor->initialize();
+    revertor->initialize(sparsity);
     auto modelBuffer = revertor->getBuffer();
     auto bufferSize  = revertor->getBufferSize();
-    
+
     // create net
     MNN_PRINT("Open Model %s\n", fileName);
     auto net = std::shared_ptr<Interpreter>(Interpreter::createFromBuffer(modelBuffer, bufferSize));
@@ -79,17 +90,28 @@ int main(int argc, const char* argv[]) {
     }
     revertor.reset();
     net->setSessionMode(Interpreter::Session_Debug);
-    
+
     // create session
     MNN::ScheduleConfig config;
     config.type           = type;
-    config.numThread      = 4;
+    config.numThread      = threadNumber;
     MNN::Session* session = NULL;
     session               = net->createSession(config);
     auto inputTensor      = net->getSessionInput(session, NULL);
     if (!inputDims.empty()) {
         net->resizeTensor(inputTensor, inputDims);
         net->resizeSession(session);
+    }
+    auto allInput = net->getSessionInputAll(session);
+    for (auto& iter : allInput) {
+        auto inputTensor = iter.second;
+        auto size = inputTensor->size();
+        if (size <= 0) {
+            continue;
+        }
+        MNN::Tensor tempTensor(inputTensor, inputTensor->getDimensionType());
+        ::memset(tempTensor.host<void>(), 0, tempTensor.size());
+        inputTensor->copyFromHostTensor(&tempTensor);
     }
     net->releaseModel();
     std::shared_ptr<MNN::Tensor> inputTensorUser(MNN::Tensor::createHostTensorFromDevice(inputTensor, false));
@@ -99,7 +121,7 @@ int main(int argc, const char* argv[]) {
         return 0;
     }
     std::shared_ptr<MNN::Tensor> outputTensorUser(MNN::Tensor::createHostTensorFromDevice(outputTensor, false));
-    
+
     auto profiler      = MNN::Profiler::getInstance();
     auto beginCallBack = [&](const std::vector<Tensor*>& inputs, const OperatorInfo* info) {
         profiler->start(info);
@@ -109,7 +131,7 @@ int main(int argc, const char* argv[]) {
         profiler->end(info);
         return true;
     };
-    
+
     AUTOTIME;
     // just run
     for (int i = 0; i < runTime; ++i) {
@@ -117,7 +139,7 @@ int main(int argc, const char* argv[]) {
         net->runSessionWithCallBackInfo(session, beginCallBack, afterCallBack);
         outputTensor->copyToHostTensor(outputTensorUser.get());
     }
-    
+
 #ifdef MNN_PRINT_TIME_BY_NAME
     profiler->printTimeByName(runTime);
 #endif

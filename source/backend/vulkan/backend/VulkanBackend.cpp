@@ -12,7 +12,7 @@
 #include "core/Macro.h"
 #include <MNN/Tensor.hpp>
 #include "core/TensorUtils.hpp"
-#include "shape/SizeComputer.hpp"
+#include "core/OpCommonUtils.hpp"
 #include "component/VulkanDevice.hpp"
 #include "execution/VulkanImageConverter.hpp"
 #include "component/VulkanInstance.hpp"
@@ -61,11 +61,8 @@ std::pair<float, bool> VulkanBackend::onMeasure(const std::vector<Tensor*>& inpu
     if (iter == creator->end()) {
         return std::make_pair(0.0f, false);
     }
-#ifndef MNN_BUILD_MINI
-    auto flops = SizeComputer::computeFlops(op, inputs, outputs);
-#else
+    // FIXME: Compute flops
     auto flops = 0.0f;
-#endif
     const float defaultScheduleCost = 0.001f;
     return std::make_pair(defaultScheduleCost + flops / 1024.0f / mRuntime->mFlops * 1000.0f, true);
 }
@@ -111,10 +108,14 @@ bool VulkanBackend::_supportImageSize(const Tensor* MTensor) {
     if (format != MNN_DATA_FORMAT_NC4HW4) {
         return true;
     }
-    if (MTensor->dimensions() > 4) {
-        return false;
-    }
-    if (UP_DIV(MTensor->channel(), 4) * MTensor->batch() > device().proty().limits.maxImageDimension3D) {
+    auto nhwc = VulkanTensor::tensorShapeFormat(MTensor);
+    auto width = UP_DIV(nhwc[3], 4) * nhwc[2];
+    auto height = nhwc[0] * nhwc[1];
+    int unit = device().proty().limits.maxImageDimension2D;
+    if (width > unit || height > unit) {
+#ifdef MNN_OP_SUPPORT_LOG
+        MNN_PRINT("Not support size: %d - %d\n", width, height);
+#endif
         return false;
     }
     return true;
@@ -183,9 +184,8 @@ Execution* VulkanBackend::onCreate(const std::vector<Tensor*>& inputs, const std
         return nullptr;
     }
     bool valid = true;
-#ifndef MNN_BUILD_MINI
     for (int i=0; i<inputs.size(); ++i) {
-        if (!SizeComputer::opNeedContent(op->type(), i)) {
+        if (!OpCommonUtils::opNeedContent(op->type(), i)) {
             continue;
         }
         auto t = inputs[i];
@@ -207,7 +207,6 @@ Execution* VulkanBackend::onCreate(const std::vector<Tensor*>& inputs, const std
             }
         }
     }
-#endif
     for (auto t : outputs) {
         if (!_supportImageSize(t)) {
             valid = false;
@@ -357,6 +356,10 @@ void VulkanBackend::onCopyBuffer(const Tensor* srcTensor, const Tensor* dstTenso
         auto unaryPipeline = getPipeline("glsl_unaryImage_comp", types);
         struct Param {
             ivec4 size;
+            ivec4 srcOffset;
+            ivec4 srcStride;
+            ivec4 dstOffset;
+            ivec4 dstStride;
         };
         std::vector<std::shared_ptr<VulkanPipeline::DescriptorSet>> mDesSet(srcVkTensor->imageSize());
         auto needSize = sizeof(Param);
@@ -378,6 +381,14 @@ void VulkanBackend::onCopyBuffer(const Tensor* srcTensor, const Tensor* dstTenso
             paramPtr->size[1] = inputT->depth();
             paramPtr->size[2] = inputT->height();
             paramPtr->size[3] = inputT->width();
+            paramPtr->dstOffset[0] = 0;
+            paramPtr->dstOffset[1] = 0;
+            paramPtr->srcOffset[0] = 0;
+            paramPtr->srcOffset[1] = 0;
+            paramPtr->dstStride[0] = 1;
+            paramPtr->dstStride[1] = 1;
+            paramPtr->srcStride[0] = 1;
+            paramPtr->srcStride[1] = 1;
             cmdBuffer->barrierImage(inputT->get(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             mDesSet[n]->writeImage(outputT->view(), getCommonSampler()->get(), VK_IMAGE_LAYOUT_GENERAL, 0);
             mDesSet[n]->writeImage(inputT->view(), getCommonSampler()->get(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);

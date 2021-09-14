@@ -28,6 +28,13 @@ struct TensorArrayAttr {
     // the shape of element
     std::vector<std::vector<int>> elemShape;
 };
+struct QuantAttr {
+    float scale;
+    float zero = 0.0f;
+    float min  = -127.0f;
+    float max  = 127.0f;
+    DataType type = DataType_DT_INT8;
+};
 /** extra tensor info container */
 struct Tensor::InsideDescribe {
 public:
@@ -78,14 +85,14 @@ public:
         View dst;
         int32_t size[3] = {1, 1, 1};
         Tensor* origin;
-        // If offset exist, the tensor dimentsion is 2 x N, first N is srcOffsest, second N is dstOffset
-        // It need copy N region by the offset tensor set
-        Tensor* offset = nullptr;
+        int mask = 0;
     };
     std::vector<Region> regions;
     halide_dimension_t dims[MNN_MAX_TENSOR_DIM];
     // TensorArray Attribute
     std::shared_ptr<TensorArrayAttr> tensorArrayAttr;
+    // Tensor Quant Attribute
+    std::shared_ptr<QuantAttr> quantAttr;
 };
 typedef Tensor::InsideDescribe::Usage TensorUsage;
 
@@ -106,6 +113,13 @@ public:
      * @param copyFormat    copy data format or not.
      */
     static void copyShape(const Tensor* source, Tensor* dest, bool copyFormat = false);
+
+    /**
+     * @brief set shape for dest tensor from a common int vector.
+     * @param dest          shape consumer tensor.
+     * @param alldims       dims info.
+     */
+    static void setShape(Tensor* dest, const std::vector<int>& alldims);
 
     /**
      * auto update tensor's strides according to extents and reorder flags.
@@ -138,10 +152,14 @@ public:
     static void setupTensorInfo(const Tensor* tensor, Tensor* wrapTensor, MNN_DATA_FORMAT mMidFormat);
     static Tensor::InsideDescribe::Region makeFullSlice(Tensor* input);
     static bool regionIsFull(Tensor* input);
+    static bool isCopyRegion(const Tensor::InsideDescribe::Region& region);
     static bool reshapeSlice(Tensor::InsideDescribe::Region& slice, int outside, int inside, int axis);
     static bool fuseRegion(Tensor::InsideDescribe::Region& srcReg, Tensor::InsideDescribe::Region& dstReg);
     static void adjustTensorForCompability(Tensor* t);
     static Tensor::DimensionType getDimType(const Tensor* t);
+    static halide_type_t DataTypeToHalideType(DataType t);
+    static DataType HaildeTypeToDataType(halide_type_t t);
+    static std::vector<float> getQuantInfo(const Tensor* t);
 };
 } // namespace MNN
 

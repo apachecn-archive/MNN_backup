@@ -57,7 +57,7 @@ class TestModel():
             outputs = [ testop ]
         return (inputs, outputs)
     def __get_shape(self, op):
-        shape = list(op.outputs[0].shape)
+        shape = [s.value if tf.__version__[0] == '1' else s for s in op.outputs[0].shape]
         for i in range(len(shape)):
             if shape[i] == None:
                 shape[i] = 1
@@ -86,7 +86,9 @@ class TestModel():
         print('inputs:')
         for key in inputs:
             print(key)
-            f = open("tf/" + key[:-2] + '.txt', 'w')
+            name = 'tf/' + key[:-2] + '.txt'
+            makeDirForPath(name)
+            f = open(name, 'w')
             np.savetxt(f, inputs[key].flatten())
             f.close()
         sess = tf.compat.v1.Session()

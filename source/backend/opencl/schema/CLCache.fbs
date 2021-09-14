@@ -3,7 +3,8 @@ attribute "priority";
 
 table Shader {
     buffer:[byte];
-    key:string;
+    program:string;
+    kernel:string;
     buildInfo:string;
 }
 
@@ -11,6 +12,7 @@ table Autotuning {
     key:string;
     gloablSize:[uint];
     localSize:[uint];
+    timeCost:uint;
 }
 
 table Cache {

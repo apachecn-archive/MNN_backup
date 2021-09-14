@@ -24,7 +24,7 @@ class SizeComputer;
 class Pipeline : public NonCopyable {
 public:
     Pipeline(std::vector<Schedule::PipelineInfo>&& info, std::shared_ptr<Backend> major,
-             std::shared_ptr<Backend> backup, bool allocInput, bool useGeometry);
+             std::shared_ptr<Backend> backup, std::shared_ptr<Backend> constBackend, bool allocInput, Runtime::CompilerType compilerType);
     ~Pipeline();
     class UnitInfo : public OperatorInfo {
     public:
@@ -43,29 +43,31 @@ public:
        3. copy op, inputs and outputs tensor info to mBuffer
        static_model:  3; dynamic_model: 1,2,3
     */
-    ErrorCode encode(bool isStatic = false);
+    ErrorCode encode(bool isStatic = false, bool supportDebug = false);
     /** allocMemory: create Execution and alloc memory for every op */
-    ErrorCode allocMemory(bool supportDebug = true);
+    ErrorCode allocMemory();
     /** execute this pipline */
     ErrorCode execute();
     ErrorCode executeCallBack(const TensorCallBackWithInfo& before, const TensorCallBackWithInfo& after);
     std::vector<Schedule::PipelineInfo>& getPipelineInfo();
 
+    float flops() const {
+        return mFlops;
+    }
 private:
-    std::shared_ptr<Backend> mBackend;
-    std::shared_ptr<Backend> mBackupBackend;
+    std::shared_ptr<Backend> mBackend, mBackupBackend, mConstBackend;
     std::vector<std::shared_ptr<Execution>> mExecutions;
     std::vector<UnitInfo> mDebugInfos;
     CommandBuffer mBuffer;
     std::vector<Schedule::PipelineInfo> mInfo;
     std::vector<Tensor*> mMidConstTensors;
-    std::vector<Tensor*> mConstTensors;
     bool mAllocInput;
     bool mInit = false;
+    float mFlops = 0.0f;
     std::map<const Op*, std::shared_ptr<Execution>> mOriginExecution;
 #ifndef MNN_BUILD_MINI
     GeometryComputer::Context mContext;
-    bool mUseGeometry = true;
+    Runtime::CompilerType mUseGeometry;
 #endif
 };
 } // namespace MNN

@@ -1,9 +1,8 @@
 {
     "matmul_output.comp":[
-        "BIAS"
-    ],
-    "matmul_kernel.comp":[
-        "TRANSPOSE"
+        "BIAS",
+        "TRANSPOSE",
+        "TRANSPOSE_BIAS"
     ],
     "matmul_input.comp":[
         "TRANSPOSE"
@@ -55,7 +54,8 @@
         "ATAN",
         "ATANH",
         "LOG1P",
-        "ROUND"
+        "ROUND",
+        "HARDSWISH"
     ],
     "unPackImage4x4.comp":[
         "TRANSPOSE"
@@ -79,10 +79,6 @@
         "RELU",
         "RELU6"
     ],
-    "col2ImMali.comp":[
-        "RELU",
-        "RELU6"
-    ],
     "convolution.comp":[
         "RELU",
         "RELU6"
@@ -98,5 +94,11 @@
     "convolutionDepthwiseMali.comp":[
         "RELU",
         "RELU6"
+    ],
+    "gridSampleNearest.comp":[
+        "PAD_MODE_ZEROS"
+    ],
+    "gridSampleBilinear.comp":[
+        "PAD_MODE_ZEROS"
     ]
 }

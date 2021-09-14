@@ -7,7 +7,6 @@
 //
 
 #include "PipelineModule.hpp"
-#include "MNN_generated.h"
 #include <set>
 #include <vector>
 #include "StaticModule.hpp"
@@ -15,116 +14,71 @@
 #include "WhileModule.hpp"
 #include "Utils.hpp"
 #include "core/Backend.hpp"
+#include "utils/InitNet.hpp"
 #include <MNN/expr/ExecutorScope.hpp>
 using namespace MNN::Express;
 namespace MNN {
 namespace Express {
 //#define DYNAMIC
-#define PIPELINE_MODULE "_pipeline_module__"
-class ExprModule : public Module {
-public:
-    ExprModule(EXPRP expr) {
-        mExpr   = expr;
-        setName(expr->name());
-        mInputs = expr->inputs();
-        auto op = mExpr->get();
-        if (op) {
-            auto typeName = EnumNameOpType(op->type());
-            setType(typeName);
+//#define MNN_PIPELINE_MODULE_DEBUG
+
+ExprModule::ExprModule(EXPRP expr) {
+    mExpr   = expr;
+    setName(expr->name());
+    mInputs = expr->inputs();
+    auto op = mExpr->get();
+    if (op) {
+        auto typeName = EnumNameOpType(op->type());
+        setType(typeName);
+    }
+    for (int i = 0; i < mInputs.size(); ++i) {
+        auto inputExpr = mInputs[i]->expr().first;
+        if (inputExpr->get() != nullptr) {
+            mInputs[i] = nullptr;
+            mInputIndexes.emplace_back(i);
+            continue;
         }
-        for (int i = 0; i < mInputs.size(); ++i) {
-            auto inputExpr = mInputs[i]->expr().first;
-            if (inputExpr->get() != nullptr) {
+        switch (inputExpr->inputType()) {
+            case VARP::INPUT:
                 mInputs[i] = nullptr;
                 mInputIndexes.emplace_back(i);
-                continue;
-            }
-            switch (inputExpr->inputType()) {
-                case VARP::INPUT:
-                    mInputs[i] = nullptr;
-                    mInputIndexes.emplace_back(i);
-                    break;
-                case VARP::CONSTANT:
-                    break;
-                case VARP::TRAINABLE:
-                    addParameter(mInputs[i]);
-                    break;
-                default:
-                    break;
-            }
+                break;
+            case VARP::CONSTANT:
+                break;
+            case VARP::TRAINABLE:
+                addParameter(mInputs[i]);
+                break;
+            default:
+                break;
         }
     }
-    virtual std::vector<VARP> onForward(const std::vector<VARP>& inputs) override {
-        MNN_ASSERT(mInputIndexes.size() == inputs.size());
-        if (nullptr == mExpr->get()) {
-            return {Variable::create(mExpr)};
-        }
-        std::vector<VARP> tempInputs = mInputs;
-        for (int i = 0; i < inputs.size(); ++i) {
-            tempInputs[mInputIndexes[i]] = inputs[i];
-        }
-        std::vector<VARP> outputVars;
-        auto newExpr = Expr::create(mExpr->extra(), std::move(tempInputs), mExpr->outputSize());
-        newExpr->setName(mExpr->name());
-        for (int i = 0; i < mExpr->outputSize(); ++i) {
-            outputVars.emplace_back(Variable::create(newExpr, i));
-        }
-        return outputVars;
-    }
-    const std::vector<int>& inputIndexes() const {
-        return mInputIndexes;
-    }
+}
 
-private:
-    Module* clone(CloneContext* ctx) const override {
-        ExprModule* module(new ExprModule(ctx->getOrClone(mExpr)));
-        for (const VARP& var : mInputs) {
-            module->mInputs.push_back(ctx->getOrClone(var));
-        }
-        module->mInputIndexes = mInputIndexes;
-        return this->cloneBaseTo(ctx, module);
+std::vector<VARP> ExprModule::onForward(const std::vector<VARP>& inputs) {
+    MNN_ASSERT(mInputIndexes.size() == inputs.size());
+    if (nullptr == mExpr->get()) {
+        return {Variable::create(mExpr)};
     }
-
-    EXPRP mExpr;
-    std::vector<VARP> mInputs;
-    std::vector<int> mInputIndexes;
-};
-
-Module* PipelineModule::extract(std::vector<Express::VARP> inputs, std::vector<Express::VARP> outputs, bool fortrain, const std::map<std::string, SubGraph>& subGraph) {
-    std::function<std::pair<std::vector<int>, std::shared_ptr<Module>>(EXPRP)> transformFunction;
-    if (fortrain) {
-        transformFunction =
-        [&subGraph](EXPRP source) {
-            if (source->get() == nullptr) {
-                return std::make_pair(std::vector<int>{}, std::shared_ptr<Module>(nullptr));
-            }
-            std::shared_ptr<Module> m(NN::Utils::ExtractNotRunableOp(source, subGraph));
-            if (nullptr != m) {
-                m->setName(source->name());
-                return std::make_pair(std::vector<int>{}, m);
-            }
-            auto convExtracted = NN::Utils::ExtractConvolution(source);
-            if (convExtracted.weight == nullptr) {
-                return std::make_pair(std::vector<int>{}, std::shared_ptr<Module>(nullptr));
-            }
-            std::shared_ptr<Module> module(NN::Conv(convExtracted));
-            module->setName(source->name());
-            return std::make_pair(std::vector<int>{0}, module);
-        };
-    } else {
-        transformFunction = [&subGraph](EXPRP source) {
-            if (source->get() == nullptr) {
-                return std::make_pair(std::vector<int>{}, std::shared_ptr<Module>(nullptr));
-            }
-            std::shared_ptr<Module> m(NN::Utils::ExtractNotRunableOp(source, subGraph));
-            if (nullptr != m) {
-                m->setName(source->name());
-                return std::make_pair(std::vector<int>{}, m);
-            }
-            return std::make_pair(std::vector<int>{}, std::shared_ptr<Module>(nullptr));
-        };
+    std::vector<VARP> tempInputs = mInputs;
+    for (int i = 0; i < inputs.size(); ++i) {
+        tempInputs[mInputIndexes[i]] = inputs[i];
     }
-    return new PipelineModule(inputs, outputs, transformFunction);
+    std::vector<VARP> outputVars;
+    auto newExpr = Expr::create(mExpr->extra(), std::move(tempInputs), mExpr->outputSize());
+    newExpr->setName(mExpr->name());
+    for (int i = 0; i < mExpr->outputSize(); ++i) {
+        outputVars.emplace_back(Variable::create(newExpr, i));
+    }
+    return outputVars;
+}
+
+Module* ExprModule::clone(CloneContext* ctx) const {
+    ExprModule* module(new ExprModule(ctx->getOrClone(mExpr)));
+    for (const VARP& var : mInputs) {
+        module->mInputs.push_back(ctx->getOrClone(var));
+    }
+    module->mInputIndexes = mInputIndexes;
+    return this->cloneBaseTo(ctx, module);
 }
 
 PipelineModule::PipelineModule(std::vector<VARP> inputs, std::vector<VARP> outputs, const Transformer& transformFunction) {
@@ -223,14 +177,6 @@ PipelineModule::PipelineModule(std::vector<VARP> inputs, std::vector<VARP> outpu
         mOutputIndexes.emplace_back(indexes[outputExpr.first] + outputExpr.second);
     }
 }
-bool PipelineModule::turnQuantize(Module* module, const int bit, NN::FeatureScaleStatMethod featureScaleStatMethod, NN::ScaleUpdateMethod scaleUpdateMethod) {
-    if (nullptr == module || module->type() != PIPELINE_MODULE) {
-        MNN_ERROR("Invalide module for quantized\n");
-        return false;
-    }
-    ((PipelineModule*)module)->toTrainQuant(bit, featureScaleStatMethod, scaleUpdateMethod);
-    return true;
-}
 
 std::vector<int> PipelineModule::countOutputReference(std::vector<int> outputIndices) {
     MNN_ASSERT(outputIndices.size() > 0);
@@ -251,127 +197,14 @@ std::vector<int> PipelineModule::countOutputReference(std::vector<int> outputInd
             }
         }
     }
-
     return countResult;
-}
-
-void PipelineModule::toTrainQuant(const int bits, NN::FeatureScaleStatMethod featureScaleStatMethod,
-                                        NN::ScaleUpdateMethod scaleUpdateMethod) {
-    std::vector<int> needEraseIndices;
-
-    for (int i = 0; i < mSubModules.size(); i++) {
-        auto& m = mSubModules[i];
-        auto& theModule = std::get<0>(m);
-        auto moduleType = theModule->type();
-        //auto& inputIndices = std::get<1>(m);
-        auto& outputIndices = std::get<2>(m);
-
-        if (moduleType == "Conv" && i < mSubModules.size() - 1) {
-            auto& p1 = mSubModules[i+1];
-            auto p1Module = std::get<0>(p1);
-            auto& p1ModuleType = p1Module->type();
-            auto& p1InputIndices = std::get<1>(p1);
-            auto& p1OutputIndices = std::get<2>(p1);
-
-            auto convOutputCount = countOutputReference(outputIndices);
-            bool convSingleOutputReference = ((outputIndices.size() == 1) && (convOutputCount[0] == 1));
-
-            // only conv
-            if ((!convSingleOutputReference) || (p1ModuleType == "Conv") ||
-                    (p1ModuleType != "BatchNorm" && p1ModuleType != "ReLU" && p1ModuleType != "ReLU6")) {
-                theModule.reset(NN::ConvBNReluFused({theModule}, featureScaleStatMethod, scaleUpdateMethod, bits));
-                registerModel({theModule});
-                continue;
-            }
-            // conv + bn + ?
-            if (p1ModuleType == "BatchNorm") {
-                bool convBnConnected = ((convSingleOutputReference) && (p1InputIndices.size() == 1) && (p1InputIndices[0] == outputIndices[0]));
-                if (!convBnConnected) {
-                    theModule.reset(NN::ConvBNReluFused({theModule}, featureScaleStatMethod, scaleUpdateMethod, bits));
-                    registerModel({theModule});
-                    continue;
-                }
-
-                // last conv + bn
-                if (i == mSubModules.size() - 2) {
-                    theModule.reset(NN::ConvBNReluFused({theModule, p1Module}, featureScaleStatMethod, scaleUpdateMethod, bits));
-                    registerModel({theModule});
-                    outputIndices = p1OutputIndices;
-                    needEraseIndices.emplace_back(i + 1);
-                    continue;
-                }
-                // maybe there is a relu or relu6 after conv + bn
-                auto& p2 = mSubModules[i+2];
-                auto& p2Module = std::get<0>(p2);
-                auto p2ModuleType = p2Module->type();
-                auto& p2InputIndices = std::get<1>(p2);
-                auto& p2OutputIndices = std::get<2>(p2);
-
-                auto bnOutputCount = countOutputReference(p1OutputIndices);
-                bool bnSingleOutputReference = ((p1OutputIndices.size() == 1) && (bnOutputCount[0] == 1));
-
-                // only conv + bn
-                if ((!bnSingleOutputReference) || (p2ModuleType != "ReLU" && p2ModuleType != "ReLU6")) {
-                    theModule.reset(NN::ConvBNReluFused({theModule, p1Module}, featureScaleStatMethod, scaleUpdateMethod, bits));
-                    registerModel({theModule});
-                    outputIndices = p1OutputIndices;
-                    needEraseIndices.emplace_back(i + 1);
-                    continue;
-                } else { // conv + bn + relu or conv + bn + relu6
-                    bool convBnReluConnected = ((bnSingleOutputReference) && (p2InputIndices.size() == 1) && (p2InputIndices[0] == p1OutputIndices[0]));
-                    if (!convBnReluConnected) {
-                        theModule.reset(NN::ConvBNReluFused({theModule, p1Module}, featureScaleStatMethod, scaleUpdateMethod, bits));
-                        registerModel({theModule});
-                        outputIndices = p1OutputIndices;
-                        needEraseIndices.emplace_back(i + 1);
-                        continue;
-                    }
-
-                    theModule.reset(NN::ConvBNReluFused({theModule, p1Module, p2Module}, featureScaleStatMethod, scaleUpdateMethod, bits));
-                    registerModel({theModule});
-                    outputIndices = p2OutputIndices;
-                    needEraseIndices.emplace_back(i + 1);
-                    needEraseIndices.emplace_back(i + 2);
-                    continue;
-                }
-            }
-            // conv + relu or conv + relu6
-            if (p1ModuleType == "ReLU" || p1ModuleType == "ReLU6") {
-                bool convReluConnected = ((convSingleOutputReference) && (p1InputIndices.size() == 1) && (p1InputIndices[0] == outputIndices[0]));
-                if (!convReluConnected) {
-                    theModule.reset(NN::ConvBNReluFused({theModule}, featureScaleStatMethod, scaleUpdateMethod, bits));
-                    registerModel({theModule});
-                    continue;
-                }
-
-                theModule.reset(NN::ConvBNReluFused({theModule, p1Module}, featureScaleStatMethod, scaleUpdateMethod, bits));
-                registerModel({theModule});
-                outputIndices = p1OutputIndices;
-                needEraseIndices.emplace_back(i + 1);
-                continue;
-            }
-        }
-
-        if (i == mSubModules.size() - 1 && moduleType == "Conv") {
-            theModule.reset(NN::ConvBNReluFused({theModule}, featureScaleStatMethod, scaleUpdateMethod, bits));
-            registerModel({theModule});
-        }
-    }
-
-    // erase useless submodules
-    const int eraseSize = needEraseIndices.size();
-    int alreadyErasedCount = 0;
-    for (int i = 0; i < eraseSize; i++) {
-        auto position = needEraseIndices[i] - alreadyErasedCount;
-        auto type = std::get<0>(mSubModules[position])->type();
-        MNN_ASSERT(type == "BatchNorm" || type == "ReLU" || type == "ReLU6");
-        mSubModules.erase(mSubModules.begin() + position);
-        alreadyErasedCount++;
-    }
 }
 
 std::vector<VARP> PipelineModule::onForward(const std::vector<VARP>& inputs) {
     std::vector<VARP> mStack(mStackSize);
+    for (int i = 0; i < mInitVars.size(); ++i) {
+        mStack[i] = mInitVars[i];
+    }
     for (int i = 0; i < mInputIndexes.size(); ++i) {
         mStack[mInputIndexes[i]] = inputs[i];
     }
@@ -383,7 +216,10 @@ std::vector<VARP> PipelineModule::onForward(const std::vector<VARP>& inputs) {
             MNN_ASSERT(nullptr != tempInputs[i]);
         }
         std::vector<VARP> tempOutputs = std::get<0>(m)->onForward(tempInputs);
-        MNN_ASSERT(tempOutputs.size() == std::get<2>(m).size());
+        if(tempOutputs.size() != std::get<2>(m).size()) {
+            // Execute has error
+            return {};
+        }
         for (int i = 0; i < tempOutputs.size(); ++i) {
             mStack[std::get<2>(m)[i]] = tempOutputs[i];
             MNN_ASSERT(nullptr != tempOutputs[i]);
@@ -418,6 +254,12 @@ void PipelineModule::_createSubGraph(const MNN::Net* net, const Module::Config* 
             auto index = graph->outputs()->data()[v];
             subOutputs.emplace_back(graph->tensors()->GetAsString(index)->str());
         }
+#ifdef MNN_PIPELINE_MODULE_DEBUG
+        for (auto& s : subOutputs) {
+            FUNC_PRINT_ALL(s.c_str(), s);
+        }
+        FUNC_PRINT_ALL(graph->name()->c_str(), s);
+#endif
         // Pack to Net for loading
         std::shared_ptr<Module> submodule;
         {
@@ -425,6 +267,7 @@ void PipelineModule::_createSubGraph(const MNN::Net* net, const Module::Config* 
             std::unique_ptr<NetT> _tempNet(new NetT);
             _tempNet->oplists = std::move(_tempInfo->nodes);
             _tempNet->tensorName = std::move(_tempInfo->tensors);
+            _tempNet->extraTensorDescribe = std::move(_tempInfo->extraTensorDescribe);
             flatbuffers::FlatBufferBuilder builder(1024);
             auto offset = Net::Pack(builder, _tempNet.get());
             builder.Finish(offset);
@@ -448,82 +291,194 @@ struct SubModuleInfo {
     std::vector<int> inputs;;
     std::vector<int> outputs;
     std::vector<uint8_t> tensorMask;
+    bool isBreak = false;
 };
-static std::vector<SubModuleInfo> _createSubModuleInfo(const MNN::Net* net, const std::set<int>& inputIndexes, const std::set<int>& outputIndexes) {
+static void _computeTensorMask(SubModuleInfo& m, const Net* net) {
+    /**Compute All SubModule's inputs and outputs*/
+    // 0: not use, 1: input, 2: output, 3: mid, 4: valid output
+    m.tensorMask = std::vector<uint8_t>(net->tensorName()->size(), 0);
+    auto& tensorMask = m.tensorMask;
+    for (auto opIndex : m.opList) {
+        auto op = net->oplists()->GetAs<Op>(opIndex);
+        if (nullptr != op->inputIndexes()) {
+            for (int v=0; v<op->inputIndexes()->size(); ++v) {
+                auto index = op->inputIndexes()->data()[v];
+                tensorMask[index] = tensorMask[index] | 1;
+            }
+        }
+        if (nullptr != op->outputIndexes()) {
+            for (int v=0; v<op->outputIndexes()->size(); ++v) {
+                auto index = op->outputIndexes()->data()[v];
+                tensorMask[index] = tensorMask[index] | 2;
+            }
+        }
+    }
+}
+
+static bool isBreakOp(const Op* op) {
+    if (op->type() == OpType_If || op->type() == OpType_While || op->type() == OpType_Where || op->type() == OpType_Segment || op->type() == OpType_Unique) {
+        return true;
+    }
+    return false;
+}
+
+static std::vector<int> _collectNeededOps(const MNN::Net* net, const std::set<int>& inputIndexes, const std::set<int>& outputIndexes) {
+    // 0: not set, 1: output, 2:input
+    std::vector<int> tensorMask(net->tensorName()->size());
+    ::memset(tensorMask.data(), 0, tensorMask.size() * sizeof(int));
+
+    // 0: use, 1: no use
+    std::vector<int> opMask(net->oplists()->size());
+    ::memset(opMask.data(), 0, opMask.size() * sizeof(int));
+    
+    // Set Initial Status
+    for (auto v : outputIndexes) {
+        tensorMask[v] = 1;
+    }
+    for (auto v : inputIndexes) {
+        // If both input/output, set as input
+        tensorMask[v] = 2;
+    }
+    bool change = false;
+    do {
+        change = false;
+        for (int i=0; i<opMask.size(); ++i) {
+            if (opMask[i] > 0) {
+                continue;
+            }
+            auto op = net->oplists()->GetAs<Op>(i);
+            if (nullptr != op->outputIndexes()) {
+                for (int j=0; j<op->outputIndexes()->size(); ++j) {
+                    auto index = op->outputIndexes()->data()[j];
+                    if (tensorMask[index] == 1) {
+                        opMask[i] = 1;
+                        change = true;
+                    }
+                }
+            }
+            if (nullptr != op->inputIndexes() && opMask[i]) {
+                for (int j=0; j<op->inputIndexes()->size(); ++j) {
+                    auto index = op->inputIndexes()->data()[j];
+                    if (tensorMask[index] != 2) {
+                        tensorMask[index] = 1;
+                    }
+                }
+            }
+        }
+    } while (change);
+
+    std::vector<int> ops;
+    for (int i=0; i<opMask.size(); ++i) {
+        if (opMask[i] > 0) {
+            auto op = net->oplists()->GetAs<Op>(i);
+            if (needComputeOp(op)) {
+                ops.emplace_back(i);
+                continue;
+            }
+        }
+    }
+    return ops;
+}
+
+static std::vector<SubModuleInfo> _createSubModuleInfo(const MNN::Net* net, const std::set<int>& inputIndexes, const std::set<int>& outputIndexes, const std::set<int>& noComputeIndexes, std::shared_ptr<Schedule::ScheduleInfo> sharedConst, std::map<int, VARP>& initVars) {
     std::vector<SubModuleInfo> submodule;
-    SubModuleInfo current;
-    std::vector<int> inputOps;
+    auto selectOps = _collectNeededOps(net, inputIndexes, outputIndexes);
 
     // Seperate the graph to serveral submodule
-    for (int i=0; i<net->oplists()->size(); ++i) {
+    SubModuleInfo current;
+    for (int si=0; si<selectOps.size(); ++si) {
+        auto i = selectOps[si];
         auto op = net->oplists()->GetAs<Op>(i);
-        // Collect Input
-        if (op->type() == OpType_Input) {
-            inputOps.emplace_back(i);
-            continue;
-        }
-        if (op->type() == OpType_If || op->type() == OpType_While || op->type() == OpType_Where) {
+        if (isBreakOp(op)) {
+            // TODO: Don't need split segment
             if (current.opList.size() > 0) {
                 // Not empty
+                // Init tensormask
+                _computeTensorMask(current, net);
                 submodule.emplace_back(std::move(current));
             }
             SubModuleInfo controlOp;
             controlOp.opList = {i};
+            controlOp.isBreak = true;
+            if (nullptr != op->inputIndexes()) {
+                controlOp.inputs.resize(op->inputIndexes()->size());
+                ::memcpy(controlOp.inputs.data(), op->inputIndexes()->data(), controlOp.inputs.size() * sizeof(int));
+                for (int v=0; v<op->inputIndexes()->size(); ++v) {
+                    auto index = op->inputIndexes()->data()[v];
+                    if (noComputeIndexes.find(index) != noComputeIndexes.end()) {
+                        auto constVar = Variable::create(Expr::create(sharedConst->allTensors[index].get()));
+                        initVars.insert(std::make_pair(index, constVar));
+                        continue;
+                    }
+                }
+            }
+            if (nullptr != op->outputIndexes()) {
+                controlOp.outputs.resize(op->outputIndexes()->size());
+                ::memcpy(controlOp.outputs.data(), op->outputIndexes()->data(), controlOp.outputs.size() * sizeof(int));
+            }
             submodule.emplace_back(std::move(controlOp));
             continue;
         }
-        current.opList.emplace_back(i);
+        bool merged = false;
+        // Find old approciate submodule
+        for (auto& m : submodule) {
+            if (m.isBreak) {
+                continue;
+            }
+            bool valid = true;
+            bool hasNotConst = false;
+            if (op->inputIndexes() != nullptr) {
+                for (int v=0; v<op->inputIndexes()->size(); ++v) {
+                    auto index = op->inputIndexes()->data()[v];
+                    if (noComputeIndexes.find(index) != noComputeIndexes.end()) {
+                        continue;
+                    }
+                    hasNotConst = true;
+                    if (m.tensorMask[index] == 0) {
+                        valid = false;
+                        break;
+                    }
+                }
+            }
+            if (valid && hasNotConst) {
+                merged = true;
+                m.opList.emplace_back(i);
+                // Update tensorMask
+                for (int v=0; v<op->outputIndexes()->size(); ++v) {
+                    auto index = op->outputIndexes()->data()[v];
+                    m.tensorMask[index] = m.tensorMask[index] | 2;
+                }
+                break;
+            }
+        }
+        if (!merged) {
+            current.opList.emplace_back(i);
+        }
     }
     if (!current.opList.empty()) {
+        _computeTensorMask(current, net);
         submodule.emplace_back(std::move(current));
     }
-
-    /**Compute All SubModule's inputs and outputs*/
-    // 0: not use, 1: input, 2: output, 3: mid, 4: valid output
     for (int moduleIndex=0; moduleIndex < submodule.size(); ++moduleIndex) {
         auto& m = submodule[moduleIndex];
-        if (1 == m.opList.size()) {
-            // Fast way to determine
-            auto op = net->oplists()->GetAs<Op>(m.opList[0]);
-            if (nullptr != op->inputIndexes()) {
-                m.inputs.resize(op->inputIndexes()->size());
-                ::memcpy(m.inputs.data(), op->inputIndexes()->data(), m.inputs.size() * sizeof(int));
-            }
-            if (nullptr != op->outputIndexes()) {
-                m.outputs.resize(op->outputIndexes()->size());
-                ::memcpy(m.outputs.data(), op->outputIndexes()->data(), m.outputs.size() * sizeof(int));
-            }
-        } else {
-            m.tensorMask = std::vector<uint8_t>(net->tensorName()->size(), 0);
-            auto& tensorMask = m.tensorMask;
-            for (auto opIndex : m.opList) {
-                auto op = net->oplists()->GetAs<Op>(opIndex);
-                if (nullptr != op->inputIndexes()) {
-                    for (int v=0; v<op->inputIndexes()->size(); ++v) {
-                        auto index = op->inputIndexes()->data()[v];
-                        tensorMask[index] = tensorMask[index] | 1;
-                    }
-                }
-                if (nullptr != op->outputIndexes()) {
-                    for (int v=0; v<op->outputIndexes()->size(); ++v) {
-                        auto index = op->outputIndexes()->data()[v];
-                        tensorMask[index] = tensorMask[index] | 2;
-                    }
-                }
-            }
-            for (int i=0; i<tensorMask.size(); ++i) {
-                if (0 == tensorMask[i]) {
+        // Compute input / output
+        if (!m.isBreak) {
+            for (int i=0; i<m.tensorMask.size(); ++i) {
+                if (0 == m.tensorMask[i]) {
                     continue;
                 }
-                if (1 == tensorMask[i]) {
+                if (1 == m.tensorMask[i]) {
+                    if (noComputeIndexes.find(i) != noComputeIndexes.end()) {
+                        continue;
+                    }
                     m.inputs.emplace_back(i);
                     continue;
                 }
-                if (2 == tensorMask[i]) {
+                if (2 == m.tensorMask[i]) {
                     m.outputs.emplace_back(i);
                     continue;
                 }
-                if (3 == tensorMask[i]) {
+                if (3 == m.tensorMask[i]) {
                     if (outputIndexes.find(i) != outputIndexes.end()) {
                         m.outputs.emplace_back(i);
                     }
@@ -534,6 +489,9 @@ static std::vector<SubModuleInfo> _createSubModuleInfo(const MNN::Net* net, cons
         for (int i=0; i<m.inputs.size(); ++i) {
             auto index = m.inputs[i];
             if (inputIndexes.find(index) != inputIndexes.end()) {
+                continue;
+            }
+            if (noComputeIndexes.find(index) != noComputeIndexes.end()) {
                 continue;
             }
             bool find = false;
@@ -581,7 +539,7 @@ static std::vector<SubModuleInfo> _createSubModuleInfo(const MNN::Net* net, cons
     return submodule;
 }
 
-static Module* _createSubModule(const MNN::Net* net, const SubModuleInfo& info, const std::map<std::string, SubGraph>& subs, const Module::Config& config, bool inRecurse) {
+static Module* _createSubModule(const MNN::Net* net, const SubModuleInfo& info, const std::map<std::string, SubGraph>& subs, const Module::Config& config, bool inRecurse, std::shared_ptr<Schedule::ScheduleInfo> sharedConst) {
     if (1 == info.opList.size()) {
         auto op = net->oplists()->GetAs<Op>(info.opList[0]);
         if (OpType_If == op->type()) {
@@ -597,6 +555,13 @@ static Module* _createSubModule(const MNN::Net* net, const SubModuleInfo& info, 
     _tempNet->tensorName.resize(net->tensorName()->size());
     for (int i=0; i<net->tensorName()->size(); ++i) {
         _tempNet->tensorName[i] = net->tensorName()->GetAsString(i)->str();
+    }
+    // Copy Tensor Describe for quant model
+    if (net->extraTensorDescribe()) {
+        _tempNet->extraTensorDescribe.resize(net->extraTensorDescribe()->size());
+        for (int i=0; i<net->extraTensorDescribe()->size(); ++i) {
+            _tempNet->extraTensorDescribe[i].reset(net->extraTensorDescribe()->Get(i)->UnPack());
+        }
     }
     // Create Input node
     std::vector<std::string> inputNames;
@@ -625,62 +590,61 @@ static Module* _createSubModule(const MNN::Net* net, const SubModuleInfo& info, 
     auto offset = Net::Pack(builder, _tempNet.get());
     builder.Finish(offset);
     _tempNet.reset();
-    return new StaticModule((const uint8_t*)builder.GetBufferPointer(), builder.GetSize(), inputNames, outputNames, config, inRecurse);
+    return new StaticModule((const uint8_t*)builder.GetBufferPointer(), builder.GetSize(), inputNames, outputNames, config, inRecurse, sharedConst);
 }
 
 Module* PipelineModule::load(const std::vector<std::string>& inputs, const std::vector<std::string>& outputs, const uint8_t* buffer, size_t length, const Module::Config* config) {
     // Create Subgraph
     auto net = GetNet(buffer);
+    if (nullptr == net->oplists() || nullptr == net->tensorName()) {
+        MNN_ERROR("Invalid net, for null oplist or tensorName\n");
+        return nullptr;
+    }
     Module::Config defaultConfig;
     if (nullptr == config) {
         config = &defaultConfig;
     }
     auto subGraphs = net->subgraphs();
-    if (nullptr == net->oplists() || nullptr == net->tensorName()) {
-        MNN_ERROR("Invalid net, for null oplist or tensorName\n");
-        return nullptr;
-    }
     std::map<std::string, SubGraph> subGraphMap;
     _createSubGraph(net, config, subGraphMap);
     return load(inputs, outputs, buffer, length, config, subGraphMap);
 }
 Module* PipelineModule::load(const std::vector<std::string>& inputs, const std::vector<std::string>& outputs, const uint8_t* buffer, size_t length, const Module::Config* config, std::map<std::string, SubGraph>& subGraphMap, bool inRecurce) {
+    std::shared_ptr<Schedule::ScheduleInfo> sharedConst;
     auto net = GetNet(buffer);
     if (!config->dynamic) {
         bool linear = true;
-        auto iter = net->oplists()->begin();
-        for (; iter != net->oplists()->end(); iter++) {
-            if (iter->type() == OpType_While) {
-                linear = false;
-                break;
-            }
-            if (iter->type() == OpType_If) {
-                linear = false;
-                break;
-            }
-            if (iter->type() == OpType_Where) {
+        for (int i=0; i<net->oplists()->size(); ++i) {
+            auto iter = net->oplists()->GetAs<Op>(i);
+            if (isBreakOp(iter)) {
                 linear = false;
                 break;
             }
         }
         if (linear) {
             // Has no control flow and WhereOp, can just use static module
-            return new StaticModule(buffer, length, inputs, outputs, *config, false);
+            return new StaticModule(buffer, length, inputs, outputs, *config, false, sharedConst);
         }
     }
-    if (config->dynamic) {
-        // For dynamic mode
-        auto varMaps = Variable::loadMap(buffer, length);
-        std::vector<VARP> inputVars(inputs.size());
-        for (int i=0; i<inputs.size(); ++i) {
-            inputVars[i] = varMaps[inputs[i]];
+    // Extra Const Tensors
+    sharedConst.reset(new Schedule::ScheduleInfo);
+    auto runtime = Executor::getGlobalExecutor()->getRuntime().second;
+    BackendConfig defaultConfig;
+    defaultConfig.flags = 4;
+    std::shared_ptr<Backend> defaultBackend(runtime->onCreate(&defaultConfig));
+    sharedConst->defaultBackend = defaultBackend;
+    std::vector<std::shared_ptr<Tensor>> allTensors;
+    sharedConst->allTensors.resize(net->tensorName()->size());
+    ErrorCode code = NO_ERROR;
+    std::set<int> noneedComputeIndexes;
+    initConstTensors(sharedConst->allTensors, net, defaultBackend.get(), false, code);
+    for (int i=0; i<sharedConst->allTensors.size(); ++i) {
+        if (sharedConst->allTensors[i].get() != nullptr) {
+            noneedComputeIndexes.insert(i);
         }
-        std::vector<VARP> outputVars(outputs.size());
-        for (int i=0; i<outputs.size(); ++i) {
-            outputVars[i] = varMaps[outputs[i]];
-        }
-        return extract(inputVars, outputVars, false, subGraphMap);
     }
+
+    std::map<int, VARP> initVars;
     std::set<int> inputIndexes;
     std::set<int> outputIndexes;
     std::map<std::string, int> inputsMap;
@@ -710,11 +674,10 @@ Module* PipelineModule::load(const std::vector<std::string>& inputs, const std::
     for (int i=0; i<outputs.size(); ++i) {
         outputIndexesVec[i] = outputsMap[outputs[i]];
     }
-
-    auto subModulesInfo = _createSubModuleInfo(net, inputIndexes, outputIndexes);
+    auto subModulesInfo = _createSubModuleInfo(net, inputIndexes, outputIndexes, noneedComputeIndexes, sharedConst, initVars);
     std::vector<std::shared_ptr<Module>> subModules(subModulesInfo.size());
     for (int i=0; i<subModulesInfo.size(); ++i) {
-        subModules[i].reset(_createSubModule(net, subModulesInfo[i], subGraphMap, *config, inRecurce));
+        subModules[i].reset(_createSubModule(net, subModulesInfo[i], subGraphMap, *config, inRecurce, sharedConst));
     }
     auto result = new PipelineModule;
     /**
@@ -727,6 +690,17 @@ Module* PipelineModule::load(const std::vector<std::string>& inputs, const std::
     // Make Stack, first: origin, second: new
     std::map<int, int> stackMap;
     int stackIndex = 0;
+    for (auto& p : initVars) {
+        stackMap.insert(std::make_pair(p.first, stackIndex));
+        result->mInitVars.emplace_back(p.second);
+        stackIndex++;
+    }
+    for (auto index : inputIndexesVec) {
+        if (stackMap.find(index) == stackMap.end()) {
+            stackMap.insert(std::make_pair(index, stackIndex));
+            stackIndex++;
+        }
+    }
     for (auto& m : subModulesInfo) {
         for (auto index : m.inputs) {
             if (stackMap.find(index) == stackMap.end()) {
@@ -742,6 +716,7 @@ Module* PipelineModule::load(const std::vector<std::string>& inputs, const std::
         }
     }
     result->mStackSize = stackMap.size();
+    MNN_ASSERT(result->mStackSize > 0);
     for (int i=0; i<subModulesInfo.size(); ++i) {
         auto& info = subModulesInfo[i];
         // Reindex stack index
@@ -763,7 +738,6 @@ Module* PipelineModule::load(const std::vector<std::string>& inputs, const std::
     }
     result->mInputIndexes = std::move(inputIndexesVec);
     result->mOutputIndexes = std::move(outputIndexesVec);
-
     return result;
 
 }
@@ -782,6 +756,7 @@ Module* PipelineModule::clone(CloneContext* ctx) const {
     module->mInputIndexes = mInputIndexes;
     module->mOutputIndexes = mOutputIndexes;
     module->mStackSize = mStackSize;
+    module->mInitVars = mInitVars;
     return this->cloneBaseTo(ctx, module);
 }
 

@@ -11,7 +11,7 @@
 namespace MNN {
 namespace OpenCL {
 bool convertNCHWBufferToImage(const Tensor *input, Tensor *output, cl::Kernel &bufferToImageKernel,
-                              OpenCLRuntime *runtime, bool needWait) {
+                              OpenCLRuntime *runtime, bool needWait, bool svmFlag) {
     std::vector<int> outputShape = tensorShapeFormat(input);
 
     uint32_t outputGlobalWorkSize[2] = {static_cast<uint32_t>(UP_DIV(outputShape[3], 4) * outputShape[2]),
@@ -24,7 +24,16 @@ bool convertNCHWBufferToImage(const Tensor *input, Tensor *output, cl::Kernel &b
     uint32_t idx = 0;
     bufferToImageKernel.setArg(idx++, outputGlobalWorkSize[0]);
     bufferToImageKernel.setArg(idx++, outputGlobalWorkSize[1]);
-    bufferToImageKernel.setArg(idx++, openCLBuffer(input));
+#ifdef MNN_OPENCL_SVM_ENABLE
+    if(svmFlag == true)
+    {
+        clSetKernelArgSVMPointer(bufferToImageKernel.get(), idx++, (const void *)input->deviceId());
+    }
+    else
+#endif
+    {
+        bufferToImageKernel.setArg(idx++, openCLBuffer(input));
+    }
     bufferToImageKernel.setArg(idx++, static_cast<uint32_t>(outputShape[1]));
     bufferToImageKernel.setArg(idx++, static_cast<uint32_t>(outputShape[2]));
     bufferToImageKernel.setArg(idx++, static_cast<uint32_t>(outputShape[3]));
@@ -33,15 +42,15 @@ bool convertNCHWBufferToImage(const Tensor *input, Tensor *output, cl::Kernel &b
     const uint32_t maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(bufferToImageKernel));
     const std::vector<uint32_t> lws = {16, std::max((uint32_t)1, maxWorkGroupSize / 16)};
     cl::Event event;
-    cl_int error;
+    cl_int res;
     std::vector<uint32_t> roundUpGroupWorkSize(lws.size());
     for (size_t i = 0; i < lws.size(); ++i) {
         roundUpGroupWorkSize[i] = ROUND_UP(outputGlobalWorkSize[i], lws[i]);
     }
-    error = runtime->commandQueue().enqueueNDRangeKernel(bufferToImageKernel, cl::NullRange,
+    res = runtime->commandQueue().enqueueNDRangeKernel(bufferToImageKernel, cl::NullRange,
                                                          cl::NDRange(roundUpGroupWorkSize[0], roundUpGroupWorkSize[1]),
                                                          cl::NDRange(lws[0], lws[1]), nullptr, &event);
-    MNN_CHECK_CL_SUCCESS(error);
+    MNN_CHECK_CL_SUCCESS(res, "nchw_buffer_to_image");
     
     if (true == needWait) {
         event.wait();
@@ -55,7 +64,7 @@ bool convertNCHWBufferToImage(const Tensor *input, Tensor *output, cl::Kernel &b
 }
 
 bool convertNHWCBufferToImage(const Tensor *input, Tensor *output, cl::Kernel &bufferToImageKernel,
-                              OpenCLRuntime *runtime, bool needWait) {
+                              OpenCLRuntime *runtime, bool needWait, bool svmFlag) {
     std::vector<int> outputShape = tensorShapeFormat(input);
     uint32_t outputGlobalWorkSize[2] = {static_cast<uint32_t>(UP_DIV(outputShape[3], 4) * outputShape[2]),
                                         static_cast<uint32_t>(outputShape[0] * outputShape[1])};
@@ -67,7 +76,15 @@ bool convertNHWCBufferToImage(const Tensor *input, Tensor *output, cl::Kernel &b
     uint32_t idx = 0;
     bufferToImageKernel.setArg(idx++, outputGlobalWorkSize[0]);
     bufferToImageKernel.setArg(idx++, outputGlobalWorkSize[1]);
-    bufferToImageKernel.setArg(idx++, openCLBuffer(input));
+#ifdef MNN_OPENCL_SVM_ENABLE
+    if(svmFlag == true) {
+        clSetKernelArgSVMPointer(bufferToImageKernel.get(), idx++, (const void *)input->deviceId());
+    }
+    else
+#endif
+    {
+        bufferToImageKernel.setArg(idx++, openCLBuffer(input));
+    }
     bufferToImageKernel.setArg(idx++, static_cast<uint32_t>(outputShape[1]));
     bufferToImageKernel.setArg(idx++, static_cast<uint32_t>(outputShape[2]));
     bufferToImageKernel.setArg(idx++, static_cast<uint32_t>(outputShape[3]));
@@ -77,15 +94,15 @@ bool convertNHWCBufferToImage(const Tensor *input, Tensor *output, cl::Kernel &b
     const uint32_t maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(bufferToImageKernel));
     const std::vector<uint32_t> lws = {16, std::max((uint32_t)1, maxWorkGroupSize / 16)};
     cl::Event event;
-    cl_int error;
+    cl_int res;
     std::vector<uint32_t> roundUpGroupWorkSize(lws.size());
     for (size_t i = 0; i < lws.size(); ++i) {
         roundUpGroupWorkSize[i] = ROUND_UP(outputGlobalWorkSize[i], lws[i]);
     }
-    error = runtime->commandQueue().enqueueNDRangeKernel(bufferToImageKernel, cl::NullRange,
+    res = runtime->commandQueue().enqueueNDRangeKernel(bufferToImageKernel, cl::NullRange,
                                                          cl::NDRange(roundUpGroupWorkSize[0], roundUpGroupWorkSize[1]),
                                                          cl::NDRange(lws[0], lws[1]), nullptr, &event);
-    MNN_CHECK_CL_SUCCESS(error);
+    MNN_CHECK_CL_SUCCESS(res, "nhwc_buffer_to_image");
     if (true == needWait) {
         event.wait();
     }
@@ -98,7 +115,7 @@ bool convertNHWCBufferToImage(const Tensor *input, Tensor *output, cl::Kernel &b
 }
 
 bool convertImageToNCHWBuffer(const Tensor *input, Tensor *output, cl::Kernel &imageToBufferKernel,
-                              OpenCLRuntime *runtime, bool needWait) {
+                              OpenCLRuntime *runtime, bool needWait, bool svmFlag) {
     std::vector<int> inputShape = tensorShapeFormat(input);
     uint32_t in_gws[2]          = {static_cast<uint32_t>(UP_DIV(inputShape[3], 4) * inputShape[2]),
                           static_cast<uint32_t>(inputShape[0] * inputShape[1])};
@@ -112,7 +129,16 @@ bool convertImageToNCHWBuffer(const Tensor *input, Tensor *output, cl::Kernel &i
     uint32_t idx = 0;
     imageToBufferKernel.setArg(idx++, in_gws[0]);
     imageToBufferKernel.setArg(idx++, in_gws[1]);
-    imageToBufferKernel.setArg(idx++, openCLBuffer(output));
+#ifdef MNN_OPENCL_SVM_ENABLE
+    if(svmFlag == true)
+    {
+        clSetKernelArgSVMPointer(imageToBufferKernel.get(), idx++, (const void *)output->deviceId());
+    }
+    else
+#endif
+    {
+        imageToBufferKernel.setArg(idx++, openCLBuffer(output));
+    }
     imageToBufferKernel.setArg(idx++, static_cast<uint32_t>(inputShape[1]));
     imageToBufferKernel.setArg(idx++, static_cast<uint32_t>(inputShape[2]));
     imageToBufferKernel.setArg(idx++, static_cast<uint32_t>(inputShape[3]));
@@ -120,15 +146,15 @@ bool convertImageToNCHWBuffer(const Tensor *input, Tensor *output, cl::Kernel &i
     const uint32_t maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(imageToBufferKernel));
     const std::vector<uint32_t> lws = {16, std::max((uint32_t)1, maxWorkGroupSize / 16)};
     cl::Event event;
-    cl_int error;
+    cl_int res;
     std::vector<uint32_t> roundUpGroupWorkSize(lws.size());
     for (size_t i = 0; i < lws.size(); ++i) {
         roundUpGroupWorkSize[i] = ROUND_UP(in_gws[i], lws[i]);
     }
-    error = runtime->commandQueue().enqueueNDRangeKernel(imageToBufferKernel, cl::NullRange,
+    res = runtime->commandQueue().enqueueNDRangeKernel(imageToBufferKernel, cl::NullRange,
                                                          cl::NDRange(roundUpGroupWorkSize[0], roundUpGroupWorkSize[1]),
                                                          cl::NDRange(lws[0], lws[1]), nullptr, &event);
-    MNN_CHECK_CL_SUCCESS(error);
+    MNN_CHECK_CL_SUCCESS(res, "image_to_nchw_buffer");
 
     if (true == needWait) {
         event.wait();
@@ -142,7 +168,7 @@ bool convertImageToNCHWBuffer(const Tensor *input, Tensor *output, cl::Kernel &i
 }
 
 bool convertNC4HW4BufferToImage(const Tensor *input, Tensor *output, cl::Kernel &bufferToImageKernel,
-                                OpenCLRuntime *runtime, bool needWait) {
+                                OpenCLRuntime *runtime, bool needWait, bool svmFlag) {
 
     uint32_t outputGlobalWorkSize[2] = {static_cast<uint32_t>(UP_DIV(input->channel(), 4) * input->width()),
                                         static_cast<uint32_t>(input->batch() * input->height())};
@@ -155,23 +181,32 @@ bool convertNC4HW4BufferToImage(const Tensor *input, Tensor *output, cl::Kernel 
     int outputImageShape[2] = {input->height(), input->width()};
     bufferToImageKernel.setArg(idx++, outputGlobalWorkSize[0]);
     bufferToImageKernel.setArg(idx++, outputGlobalWorkSize[1]);
-    bufferToImageKernel.setArg(idx++, openCLBuffer(input));
+#ifdef MNN_OPENCL_SVM_ENABLE
+    if(svmFlag == true)
+    {
+        clSetKernelArgSVMPointer(bufferToImageKernel.get(), idx++, (const void *)input->deviceId());
+    }
+    else
+#endif
+    {
+        bufferToImageKernel.setArg(idx++, openCLBuffer(input));
+    }
     bufferToImageKernel.setArg(idx++, sizeof(outputImageShape), outputImageShape);
-    bufferToImageKernel.setArg(idx++, UP_DIV(input->channel(), 4));
+    bufferToImageKernel.setArg(idx++, input->batch());
     bufferToImageKernel.setArg(idx++, openCLImage(output));
 
     const uint32_t maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(bufferToImageKernel));
     const std::vector<uint32_t> lws = {16, std::max((uint32_t)1, maxWorkGroupSize / 16)};
     cl::Event event;
-    cl_int error;
+    cl_int res;
     std::vector<uint32_t> roundUpGroupWorkSize(lws.size());
     for (size_t i = 0; i < lws.size(); ++i) {
         roundUpGroupWorkSize[i] = ROUND_UP(outputGlobalWorkSize[i], lws[i]);
     }
-    error = runtime->commandQueue().enqueueNDRangeKernel(bufferToImageKernel, cl::NullRange,
+    res = runtime->commandQueue().enqueueNDRangeKernel(bufferToImageKernel, cl::NullRange,
                                                          cl::NDRange(roundUpGroupWorkSize[0], roundUpGroupWorkSize[1]),
                                                          cl::NDRange(lws[0], lws[1]), nullptr, &event);
-    MNN_CHECK_CL_SUCCESS(error);
+    MNN_CHECK_CL_SUCCESS(res, "nc4hw4_buffer_to_image");
     if (true == needWait) {
         event.wait();
     }
@@ -193,7 +228,7 @@ bool convertNC4HW4BufferToImage(const Tensor *input, Tensor *output, cl::Kernel 
  * @return true if success, false otherwise.
  */
 bool convertImageToNC4HW4Buffer(const Tensor *input, Tensor *output, cl::Kernel &imageToBufferKernel,
-                                OpenCLRuntime *runtime, bool needWait) {
+                                OpenCLRuntime *runtime, bool needWait, bool svmFlag) {
     auto inputShape = tensorShapeFormat(input);
     uint32_t in_gws[2]          = {static_cast<uint32_t>(UP_DIV(inputShape.at(3), 4) * inputShape.at(2)),
                           static_cast<uint32_t>(inputShape.at(0) * inputShape.at(1))};
@@ -208,22 +243,31 @@ bool convertImageToNC4HW4Buffer(const Tensor *input, Tensor *output, cl::Kernel 
     int outputImageShape[2] = {inputShape.at(1), inputShape.at(2)};
     imageToBufferKernel.setArg(idx++, in_gws[0]);
     imageToBufferKernel.setArg(idx++, in_gws[1]);
-    imageToBufferKernel.setArg(idx++, openCLBuffer(output));
+#ifdef MNN_OPENCL_SVM_ENABLE
+    if(svmFlag == true)
+    {
+        clSetKernelArgSVMPointer(imageToBufferKernel.get(), idx++, (const void *)output->deviceId());
+    }
+    else
+#endif
+    {
+        imageToBufferKernel.setArg(idx++, openCLBuffer(output));
+    }
     imageToBufferKernel.setArg(idx++, sizeof(outputImageShape), outputImageShape);
-    imageToBufferKernel.setArg(idx++, static_cast<uint32_t>(UP_DIV(inputShape.at(3), 4)));
+    imageToBufferKernel.setArg(idx++, input->batch());
     imageToBufferKernel.setArg(idx++, openCLImage(input));
     const uint32_t maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(imageToBufferKernel));
     const std::vector<uint32_t> lws = {16, std::max((uint32_t)1, maxWorkGroupSize / 16)};
     cl::Event event;
-    cl_int error;
+    cl_int res;
     std::vector<uint32_t> roundUpGroupWorkSize(lws.size());
     for (size_t i = 0; i < lws.size(); ++i) {
         roundUpGroupWorkSize[i] = ROUND_UP(in_gws[i], lws[i]);
     }
-    error = runtime->commandQueue().enqueueNDRangeKernel(imageToBufferKernel, cl::NullRange,
+    res = runtime->commandQueue().enqueueNDRangeKernel(imageToBufferKernel, cl::NullRange,
                                                          cl::NDRange(roundUpGroupWorkSize[0], roundUpGroupWorkSize[1]),
                                                          cl::NDRange(lws[0], lws[1]), nullptr, &event);
-    MNN_CHECK_CL_SUCCESS(error);
+    MNN_CHECK_CL_SUCCESS(res, "image_to_nc4hw4_buffer");
 
     if (true == needWait) {
         event.wait();
@@ -237,7 +281,7 @@ bool convertImageToNC4HW4Buffer(const Tensor *input, Tensor *output, cl::Kernel 
 }
 
 bool convertImageToNHWCBuffer(const Tensor *input, Tensor *output, cl::Kernel &imageToBufferKernel,
-                              OpenCLRuntime *runtime, bool needWait) {
+                              OpenCLRuntime *runtime, bool needWait, bool svmFlag) {
     std::vector<int> inputShape = tensorShapeFormat(input);
     uint32_t in_gws[2]          = {static_cast<uint32_t>(UP_DIV(inputShape[3], 4) * inputShape[2]),
                           static_cast<uint32_t>(inputShape[0] * inputShape[1])};
@@ -251,7 +295,16 @@ bool convertImageToNHWCBuffer(const Tensor *input, Tensor *output, cl::Kernel &i
     uint32_t idx = 0;
     imageToBufferKernel.setArg(idx++, in_gws[0]);
     imageToBufferKernel.setArg(idx++, in_gws[1]);
-    imageToBufferKernel.setArg(idx++, openCLBuffer(output));
+#ifdef MNN_OPENCL_SVM_ENABLE
+    if(svmFlag == true)
+    {
+        clSetKernelArgSVMPointer(imageToBufferKernel.get(), idx++, (const void *)output->deviceId());
+    }
+    else
+#endif
+    {
+        imageToBufferKernel.setArg(idx++, openCLBuffer(output));
+    }
     imageToBufferKernel.setArg(idx++, static_cast<uint32_t>(inputShape[1]));
     imageToBufferKernel.setArg(idx++, static_cast<uint32_t>(inputShape[2]));
     imageToBufferKernel.setArg(idx++, static_cast<uint32_t>(inputShape[3]));
@@ -259,15 +312,15 @@ bool convertImageToNHWCBuffer(const Tensor *input, Tensor *output, cl::Kernel &i
     const uint32_t maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(imageToBufferKernel));
     const std::vector<uint32_t> lws = {16, std::max((uint32_t)1, maxWorkGroupSize / 16)};
     cl::Event event;
-    cl_int error;
+    cl_int res;
     std::vector<uint32_t> roundUpGroupWorkSize(lws.size());
     for (size_t i = 0; i < lws.size(); ++i) {
         roundUpGroupWorkSize[i] = ROUND_UP(in_gws[i], lws[i]);
     }
-    error = runtime->commandQueue().enqueueNDRangeKernel(imageToBufferKernel, cl::NullRange,
+    res = runtime->commandQueue().enqueueNDRangeKernel(imageToBufferKernel, cl::NullRange,
                                                          cl::NDRange(roundUpGroupWorkSize[0], roundUpGroupWorkSize[1]),
                                                          cl::NDRange(lws[0], lws[1]), nullptr, &event);
-    MNN_CHECK_CL_SUCCESS(error);
+    MNN_CHECK_CL_SUCCESS(res, "image_to_nhwc_buffer");
 
     if (true == needWait) {
         event.wait();
@@ -281,7 +334,7 @@ bool convertImageToNHWCBuffer(const Tensor *input, Tensor *output, cl::Kernel &i
     return true;
 }
 bool ImageBufferConvertor::convertImageToBuffer(const Tensor *image, const OpenCLBufferFormat type, Tensor *buffer,
-                                                bool needWait) {
+                                                bool needWait, bool svmFlag) {
 #ifdef LOG_VERBOSE
     MNN_PRINT("start convertImageToBuffer !\n");
 #endif
@@ -339,18 +392,18 @@ bool ImageBufferConvertor::convertImageToBuffer(const Tensor *image, const OpenC
     const std::vector<uint32_t> lws = {16, std::max((uint32_t)1, maxWorkGroupSize / 16)};
 
     cl::Event event;
-    cl_int error;
+    cl_int res;
 
     std::vector<uint32_t> roundUpGroupWorkSize(lws.size());
     for (size_t i = 0; i < lws.size(); ++i) {
         roundUpGroupWorkSize[i] = ROUND_UP(gws[i], lws[i]);
     }
 
-    error = runtime->commandQueue().enqueueNDRangeKernel(mImageToBufferKernel, cl::NullRange,
+    res = runtime->commandQueue().enqueueNDRangeKernel(mImageToBufferKernel, cl::NullRange,
                                                          cl::NDRange(roundUpGroupWorkSize[0], roundUpGroupWorkSize[1]),
                                                          cl::NDRange(lws[0], lws[1]), nullptr, &event);
 
-    MNN_CHECK_CL_SUCCESS(error);
+    MNN_CHECK_CL_SUCCESS(res, "convertImageToBuffer");
 
     if (needWait) {
         event.wait();
@@ -445,17 +498,17 @@ bool ImageBufferConvertor::convertBufferToImage(const Tensor *buffer, const Open
     const std::vector<uint32_t> lws = {16, std::max((uint32_t)1, maxWorkGroupSize / 16)};
 
     cl::Event event;
-    cl_int error;
+    cl_int res;
 
     std::vector<uint32_t> roundUpGroupWorkSize(lws.size());
     for (size_t i = 0; i < lws.size(); ++i) {
         roundUpGroupWorkSize[i] = ROUND_UP(gws[i], lws[i]);
     }
 
-    error = runtime->commandQueue().enqueueNDRangeKernel(mBufferToImageKernel, cl::NullRange,
+    res = runtime->commandQueue().enqueueNDRangeKernel(mBufferToImageKernel, cl::NullRange,
                                                          cl::NDRange(roundUpGroupWorkSize[0], roundUpGroupWorkSize[1]),
                                                          cl::NDRange(lws[0], lws[1]), nullptr, &event);
-    MNN_CHECK_CL_SUCCESS(error);
+    MNN_CHECK_CL_SUCCESS(res, "convertBufferToImage");
 
     if (needWait) {
         event.wait();

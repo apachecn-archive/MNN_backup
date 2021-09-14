@@ -8,10 +8,9 @@
 
 #include <MNN/expr/Module.hpp>
 #include <MNN/expr/ExprCreator.hpp>
-#include "FixModule.hpp"
 #include "PipelineModule.hpp"
 #include "core/FileLoader.hpp"
-
+#include "MNN_generated.h"
 namespace MNN {
 namespace Express {
 
@@ -124,26 +123,65 @@ Module* Module::load(const std::vector<std::string>& inputs, const std::vector<s
         FileLoader loader(fileName);
         if (!loader.valid()) {
             MNN_ERROR("Error for open %s\n", fileName);
-            return {};
+            return nullptr;
         }
         loader.read();
         if (!loader.valid()) {
-            return {};
+            return nullptr;
         }
         loader.merge(buffer);
         if (buffer.get() == nullptr) {
-            return {};
+            return nullptr;
         }
     }
     return load(inputs, outputs, buffer.get(), buffer.size(), config);
 }
 
 Module* Module::load(const std::vector<std::string>& inputs, const std::vector<std::string>& outputs, const uint8_t* buffer, size_t length, const Module::Config* config) {
-    return PipelineModule::load(inputs, outputs, buffer, length, config);
-}
-
-Module* Module::extract(std::vector<Express::VARP> inputs, std::vector<Express::VARP> outputs, bool fortrain, const std::map<std::string, SubGraph>& subGraph) {
-    return PipelineModule::extract(inputs, outputs, fortrain, subGraph);
+    // Check Auto Inputs and Outputs
+    auto net = GetNet(buffer);
+    if (nullptr == net->oplists() || nullptr == net->tensorName()) {
+        MNN_ERROR("Invalid net, for null oplist or tensorName\n");
+        return nullptr;
+    }
+    if ((!inputs.empty()) && (!outputs.empty())) {
+        return PipelineModule::load(inputs, outputs, buffer, length, config);
+    }
+    std::vector<std::string> newInputs = inputs;
+    std::vector<std::string> newOutputs = outputs;
+    std::set<int> inputIdx, outputIdx, realInput, realOutput;
+    for (int i=0; i< net->oplists()->size(); ++i) {
+        auto op = net->oplists()->GetAs<Op>(i);
+        if (nullptr != op->inputIndexes()) {
+            auto data = op->inputIndexes()->data();
+            auto size = op->inputIndexes()->size();
+            for (int j=0; j<size; ++j) {
+                inputIdx.insert(data[j]);
+            }
+        }
+        if (nullptr != op->outputIndexes()) {
+            auto data = op->outputIndexes()->data();
+            auto size = op->outputIndexes()->size();
+            for (int j=0; j<size; ++j) {
+                outputIdx.insert(data[j]);
+                if (op->type() == OpType_Input) {
+                    realInput.insert(data[j]);
+                }
+            }
+        }
+    }
+    std::set_difference(outputIdx.begin(), outputIdx.end(), inputIdx.begin(), inputIdx.end(), std::inserter(realOutput, realOutput.begin()));
+    if (newInputs.empty()) {
+        for (auto index : realInput) {
+            newInputs.emplace_back(net->tensorName()->GetAsString(index)->str());
+        }
+    }
+    if (newOutputs.empty()) {
+        for (auto index : realOutput) {
+            newOutputs.emplace_back(net->tensorName()->GetAsString(index)->str());
+        }
+    }
+    return PipelineModule::load(newInputs, newOutputs, buffer, length, config);
 }
 
 EXPRP Module::CloneContext::getOrClone(EXPRP expr) {
@@ -191,6 +229,10 @@ Module* Module::cloneBaseTo(CloneContext* ctx, Module* module) const {
     module->mName = mName;
     module->mType = mType;
     return module;
+}
+
+Module* Module::extract(std::vector<Express::VARP> inputs, std::vector<Express::VARP> outputs, bool fortrain, const std::map<std::string, SubGraph>& subGraph) {
+    return new PipelineModule(inputs, outputs);
 }
 
 } // namespace Express

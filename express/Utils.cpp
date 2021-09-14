@@ -25,14 +25,13 @@ Expr::Inside::Inside(int outputSize) {
         TensorUtils::getDescribe(mOutputTensors[i])->memoryType = Tensor::InsideDescribe::MEMORY_HOST;
     }
 }
-Expr::Inside::Inside(Tensor* tensor) {
+Expr::Inside::Inside(Tensor* tensor, bool own) {
     mOutputInfos.resize(1);
     mOutputTensors.resize(1);
     mOutputTensors[0] = tensor;
     Utils::copyTensorToInfo(&mOutputInfos[0], tensor);
     mOutputInfos[0].syncSize();
-    mOutputInfos[0].tensorArrayAttr = TensorUtils::getDescribe(tensor)->tensorArrayAttr;
-    mOwnTensor = false;
+    mOwnTensor = own;
 }
 
 Expr::Inside::~Inside() {
@@ -78,6 +77,7 @@ halide_type_t Utils::revertDataType(DataType dataType) {
     CONVERT(DataType_DT_INT64, halide_type_of<int32_t>(), dataType);
     CONVERT(DataType_DT_UINT8, halide_type_of<uint8_t>(), dataType);
     CONVERT(DataType_DT_INT8, halide_type_of<int8_t>(), dataType);
+    CONVERT(DataType_DT_HALF, halide_type_of<float>(), dataType);
     return halide_type_of<float>();
 }
 Express::Dimensionformat Utils::revertFormat(int format) {

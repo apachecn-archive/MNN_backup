@@ -17,7 +17,7 @@
 asm_function MNNVectorTop1Float
 // void MNNVectorTop1Float(float* input, float* maxValue, int32_t* maxIndex, size_t inputCountUnit);
 
-push {r4-r11, lr}
+push {r4-r8, r10, r11, lr} // avoid to touch platform-register r-9
 
 // Auto: r0: input, r1: maxValue, r2: maxIndex, r3: inputCountUnit
 
@@ -57,7 +57,7 @@ Loop:
 
     vadd.s32 q11, q11, q10
     subs r3, r3, #1
-    
+
     bne Loop
 
 // reduce result to single value and index
@@ -72,11 +72,10 @@ vcgt.f32 d24, d31, d30
 vbit.f32 d30, d31, d24
 vbit.s32 d28, d29, d24
 
-vst1.f32 d30[0], [r1]
-vst1.s32 d28[0], [r2]
-
 End:
-    pop {r4-r11, pc}
+    vst1.f32 d30[0], [r1]
+    vst1.s32 d28[0], [r2]
+    pop {r4-r8, r10, r11, pc}
 
 
 #endif

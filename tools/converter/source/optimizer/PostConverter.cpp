@@ -10,13 +10,13 @@
 
 #include <MNN/expr/Optimizer.hpp>
 #include <set>
-#include "../common/Global.hpp"
 #include "PostConverter.hpp"
 #include "PostTreatUtils.hpp"
 #include "Program.hpp"
 #include "SubGraphComplete.hpp"
 #include "GenerateSubGraph.hpp"
 #include "TemplateMerge.hpp"
+//#define MNN_POST_CONVERTER_DEBUG
 
 namespace MNN {
 namespace Express {
@@ -58,6 +58,7 @@ bool CompleteSubGraph(const std::unordered_map<std::string, VARP>& inputs, const
     subnet->oplists    = std::move(mutable_subgraph->nodes);
     subnet->tensorName = mutable_subgraph->tensors;
     subnet->sourceType = ctx->source;
+    subnet->outputName = outputNames;
 
     std::unique_ptr<MNN::NetT> new_subnet = ctx->RunOptimize(subnet, inputs);
     mutable_subgraph->nodes               = std::move(subnet->oplists);
@@ -120,11 +121,16 @@ std::unique_ptr<MNN::NetT> RunExtraPass(std::unique_ptr<MNN::NetT>& originNet,
         case MNN::NetSource_ONNX:
             pass = "OnnxExtra";
             break;
+        case MNN::NetSource_TORCH:
+            pass = "TorchExtra";
+            break;
         default:
             break;
     }
     auto& merge = MNN::Express::TemplateMerge::getInstance(pass);
     merge.onExecute(program->outputs());
+    originNet->oplists.clear();
+    originNet->tensorName.clear();
 
     std::unique_ptr<MNN::NetT> newNet(new MNN::NetT);
     auto outputs       = program->outputs();
@@ -143,6 +149,8 @@ std::unique_ptr<MNN::NetT> RunMergePass(std::unique_ptr<MNN::NetT>& originNet,
     std::string pass = "Merge";
     auto& merge      = MNN::Express::TemplateMerge::getInstance(pass);
     merge.onExecute(program->outputs(), priority);
+    originNet->oplists.clear();
+    originNet->tensorName.clear();
 
     std::unique_ptr<MNN::NetT> newNet(new MNN::NetT);
     auto outputs       = program->outputs();
@@ -177,6 +185,12 @@ std::unique_ptr<MNN::NetT> optimizeNetImpl(std::unique_ptr<MNN::NetT>& originNet
         // Remove Dropout, if `forTraining` flag is set, Dropout will be reserved
         "RemoveDropout",
 
+        // Remove Dup op
+        "FuseDupOp",
+        
+        // Remove Invalid Cast
+        "RemoveInvalidCast",
+
         // Turn InnerProduct from Caffe / Onnx to Convolution
         "TransformInnerProduct",
 
@@ -186,8 +200,6 @@ std::unique_ptr<MNN::NetT> optimizeNetImpl(std::unique_ptr<MNN::NetT>& originNet
         // Turn Caffe's ShuffleChannel to compose op
         "TransformShuffleChannel",
 
-        // Turn Onnx's Pad to Tensorflow's Pad
-        "TransformOnnxPad",
     };
     if (ctx->is_training) {
         std::vector<std::string>::iterator iter;
@@ -389,6 +401,7 @@ bool fuseConstIntoSubgraph(MNN::NetT* net, const std::vector<MNN::SubGraphProtoT
                 continue;
             }
             auto& constOp = net->oplists[constIndex];
+            //FUNC_PRINT_ALL(constOp->name.c_str(), s);
             MNN_ASSERT(constOp->main.type == MNN::OpParameter_Blob);
 
             removeConstOpIndexes.insert(constIndex);
@@ -441,13 +454,28 @@ bool fuseConstIntoSubgraph(MNN::NetT* net, const std::vector<MNN::SubGraphProtoT
         subnet->oplists    = std::move(mutable_subgraph->nodes);
         subnet->tensorName = std::move(mutable_subgraph->tensors);
         subnet->sourceType = ctx->source;
+        std::vector<std::string> inputNames;
+        std::vector<std::string> outputNames;
+        for (auto v: mutable_subgraph->inputs) {
+            inputNames.emplace_back(subnet->tensorName[v]);
+        }
+        for (auto v: mutable_subgraph->outputs) {
+            outputNames.emplace_back(subnet->tensorName[v]);
+        }
+#ifdef MNN_POST_CONVERTER_DEBUG
+        for (auto& v : outputNames) {
+            FUNC_PRINT_ALL(v.c_str(), s);
+        }
+        FUNC_PRINT_ALL(mutable_subgraph->name.c_str(), s);
+#endif
+        subnet->outputName = outputNames;
 
         std::unique_ptr<MNN::NetT> new_subnet = optimizeNetImpl(subnet, empty);
         mutable_subgraph->nodes               = std::move(subnet->oplists);
 
         MNN::SubGraphProtoT* new_subgraph = mutable_subgraph;
-        for (int i = 0; i < mutable_subgraph->inputs.size(); ++i) {
-            auto& name = subnet->tensorName[mutable_subgraph->inputs[i]];
+        for (int i = 0; i < inputNames.size(); ++i) {
+            auto& name = inputNames[i];
             for (int v = 0; v < new_subnet->tensorName.size(); ++v) {
                 if (new_subnet->tensorName[v] == name) {
                     mutable_subgraph->inputs[i] = v;
@@ -455,8 +483,8 @@ bool fuseConstIntoSubgraph(MNN::NetT* net, const std::vector<MNN::SubGraphProtoT
                 }
             }
         }
-        for (int i = 0; i < mutable_subgraph->outputs.size(); ++i) {
-            auto& name = subnet->tensorName[mutable_subgraph->outputs[i]];
+        for (int i = 0; i < outputNames.size(); ++i) {
+            auto& name = outputNames[i];
             for (int v = 0; v < new_subnet->tensorName.size(); ++v) {
                 if (new_subnet->tensorName[v] == name) {
                     mutable_subgraph->outputs[i] = v;
@@ -475,7 +503,8 @@ bool fuseConstIntoSubgraph(MNN::NetT* net, const std::vector<MNN::SubGraphProtoT
 
 using namespace MNN;
 using namespace MNN::Express;
-std::unique_ptr<MNN::NetT> optimizeNet(std::unique_ptr<MNN::NetT>& originNet, bool forTraining) {
+std::unique_ptr<MNN::NetT> optimizeNet(std::unique_ptr<MNN::NetT>& originNet, bool forTraining, modelConfig& config) {
+    Global<modelConfig>::Reset(&config);
     if (originNet->sourceType == NetSource_TENSORFLOW) {
         GenerateSubGraph(originNet);
     }
@@ -493,10 +522,19 @@ std::unique_ptr<MNN::NetT> optimizeNet(std::unique_ptr<MNN::NetT>& originNet, bo
 
     Global<OptimizeContext>::Reset(&ctx);
 
-    std::unordered_map<std::string, VARP> empty;
-    for (auto& subGraph : originNet->subgraphs) {
-        CompleteSubGraph(empty, subGraph.get());
+    if (!originNet->subgraphs.empty()) {
+        std::unordered_map<std::string, VARP> inputs;
+        auto program = Program::create(originNet.get(), true, true);
+        for (const auto& iter : program->vars()) {
+            if (iter.first < originNet->tensorName.size() && iter.first >= 0) {
+                inputs[originNet->tensorName[iter.first]] = iter.second;
+            }
+        }
+        for (auto& subGraph : originNet->subgraphs) {
+            CompleteSubGraph(inputs, subGraph.get());
+        }
     }
+    std::unordered_map<std::string, VARP> empty;
     std::unique_ptr<MNN::NetT> net = ctx.RunOptimize(originNet, empty);
     fuseConstIntoSubgraph(net.get(), ctx.completed_subgraphs);
     for (auto* subgraph : ctx.completed_subgraphs) {

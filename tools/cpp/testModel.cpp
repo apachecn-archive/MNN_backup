@@ -87,17 +87,50 @@ int main(int argc, const char* argv[]) {
     backendConfig.precision = precision;
     config.backendConfig = &backendConfig;
     auto session         = net->createSession(config);
-
+    
+    // input dims
+    std::vector<int> inputDims;
+    if (argc > 7) {
+        std::string inputShape(argv[7]);
+        const char* delim = "x";
+        std::ptrdiff_t p1 = 0, p2;
+        while (1) {
+            p2 = inputShape.find(delim, p1);
+            if (p2 != std::string::npos) {
+                inputDims.push_back(atoi(inputShape.substr(p1, p2 - p1).c_str()));
+                p1 = p2 + 1;
+            } else {
+                inputDims.push_back(atoi(inputShape.substr(p1).c_str()));
+                break;
+            }
+        }
+    }
+    for (auto dim : inputDims) {
+        MNN_PRINT("%d ", dim);
+    }
+    MNN_PRINT("\n");
+    
+    
     auto allInput = net->getSessionInputAll(session);
     for (auto& iter : allInput) {
         auto inputTensor = iter.second;
+        
+        if (!inputDims.empty()) {
+            MNN_PRINT("===========> Resize Tensor...\n");
+            net->resizeTensor(inputTensor, inputDims);
+            net->resizeSession(session);
+        }
+        
         auto size = inputTensor->size();
         if (size <= 0) {
             continue;
         }
-        MNN::Tensor tempTensor(inputTensor, inputTensor->getDimensionType());
-        ::memset(tempTensor.host<void>(), 0, tempTensor.size());
-        inputTensor->copyFromHostTensor(&tempTensor);
+        
+        void* host = inputTensor->map(MNN::Tensor::MAP_TENSOR_WRITE,  inputTensor->getDimensionType());
+        if(host != nullptr) {
+            ::memset(host, 0, inputTensor->size());
+        }
+        inputTensor->unmap(MNN::Tensor::MAP_TENSOR_WRITE,  inputTensor->getDimensionType(), host);
     }
 
     // write input tensor
@@ -112,7 +145,12 @@ int main(int argc, const char* argv[]) {
         return -1;
     }
     // First time
-    inputTensor->copyFromHostTensor(givenTensor.get());
+    void* host = inputTensor->map(MNN::Tensor::MAP_TENSOR_WRITE, givenTensor.get()->getDimensionType());
+    if(host != nullptr) {
+        ::memcpy(host, givenTensor->host<uint8_t>(), givenTensor->size());
+    }
+    inputTensor->unmap(MNN::Tensor::MAP_TENSOR_WRITE,  givenTensor.get()->getDimensionType(), host);
+
     // infer
     net->runSession(session);
     // read expect tensor
@@ -140,7 +178,12 @@ int main(int argc, const char* argv[]) {
         printf("First run pass\n");
     }
     // Run Second time
-    inputTensor->copyFromHostTensor(givenTensor.get());
+    void* host1 = inputTensor->map(MNN::Tensor::MAP_TENSOR_WRITE, givenTensor.get()->getDimensionType());
+    if(host1 != nullptr) {
+        ::memcpy(host1, givenTensor->host<uint8_t>(), givenTensor->size());
+    }
+    inputTensor->unmap(MNN::Tensor::MAP_TENSOR_WRITE,  givenTensor.get()->getDimensionType(), host1);
+
     // infer
     net->runSession(session);
     // read expect tensor

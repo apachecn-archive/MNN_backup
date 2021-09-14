@@ -1,3 +1,11 @@
+//
+//  Pass.hpp
+//  MNNConverter
+//
+//  Created by MNN on b'2020/12/07'.
+//  Copyright © 2018, Alibaba Group Holding Limited
+//
+
 #ifndef MNN_CONVERTER_PASSES_PASS_HPP_
 #define MNN_CONVERTER_PASSES_PASS_HPP_
 
@@ -26,7 +34,7 @@ class NestedPass;
 class PassManager;
 
 // The abstract base pass class.
-class Pass {
+class MNN_PUBLIC Pass {
 public:
     Pass() = default;
     Pass(const std::string& pass_name) : pass_name_(pass_name) {}
@@ -48,7 +56,7 @@ private:
     std::string pass_name_;
 };
 
-class PassManager {
+class MNN_PUBLIC PassManager {
 public:
     PassManager() = delete;
     PassManager(PassContext *context) : context_(context) {}
@@ -78,7 +86,7 @@ private:
     std::vector<std::unique_ptr<Pass>> passes_;
 };
 
-class NestedPass : public Pass {
+class MNN_PUBLIC NestedPass : public Pass {
 public:
     NestedPass() = default;
     NestedPass(const std::string& pass_name, PassContext *context);
@@ -98,7 +106,7 @@ private:
     std::unique_ptr<PassManager> pass_manager_;
 };
 
-class RewritePass : public Pass {
+class MNN_PUBLIC RewritePass : public Pass {
 public:
     using FuncType = std::function<bool(PassContext* context)>;
 

@@ -61,7 +61,7 @@ VARP _mobileNetV1Expr() {
 }
 class MemoryIncreaseMobileNetV1Test : public MNNTestCase {
 public:
-    virtual bool run() {
+    virtual bool run(int precision) {
         auto y = _mobileNetV1Expr();
         std::unique_ptr<MNN::NetT> net(new NetT);
         Variable::save({y}, net.get());
@@ -98,11 +98,30 @@ MNNTestSuiteRegister(MemoryIncreaseMobileNetV1Test, "expr/MemoryIncrease/mobilen
 
 class MemoryIncreaseInterpTest : public MNNTestCase {
 public:
-    virtual bool run() {
+    virtual bool run(int precision) {
         auto x = _Input({1, 3, 224, 224}, NCHW, halide_type_of<float>());
         auto y = _Interp({x}, 0.25, 0.25, 56, 56, 2, true);
+        y = _Convert(y, NCHW);
+        auto size = y->getInfo()->size;
+        int e = 14;
+        y = _Reshape(y, {e, -1});
+        auto l = size / e;
+        VARP res;
+        {
+            std::unique_ptr<OpT> mat(new OpT);
+            mat->type = OpType_MatMul;
+            mat->main.type = OpParameter_MatMul;
+            mat->main.value = new MatMulT;
+            mat->main.AsMatMul()->transposeA = false;
+            mat->main.AsMatMul()->transposeB = false;
+
+            std::vector<float> bias(e, 0.0f);
+            auto biasVar = _Const(bias.data(), {e}, NCHW, halide_type_of<float>());
+            auto weightVar = _Input({l, 50}, NCHW, halide_type_of<float>());
+            res = Variable::create(Expr::create(mat.get(), {y, weightVar, biasVar}));
+        }
         std::unique_ptr<MNN::NetT> net(new NetT);
-        Variable::save({y}, net.get());
+        Variable::save({res}, net.get());
         flatbuffers::FlatBufferBuilder builderOutput(1024);
         auto len = MNN::Net::Pack(builderOutput, net.get());
         builderOutput.Finish(len);
@@ -113,7 +132,7 @@ public:
         config.type      = MNN_FORWARD_CPU;
         auto session     = interp->createSession(config);
         auto input       = interp->getSessionInput(session, nullptr);
-        
+
         {
             interp->resizeTensor(input, {1, 3, 112, 112});
             interp->resizeSession(session);
@@ -122,7 +141,7 @@ public:
         }
         float initMemory = 0.0f;
         interp->getSessionInfo(session, MNN::Interpreter::MEMORY, &initMemory);
-        
+
         for (int i = 0; i < 100; ++i) {
             if (i % 2 == 0) {
                 interp->resizeTensor(input, {1, 3, 112, 112});
@@ -144,7 +163,7 @@ MNNTestSuiteRegister(MemoryIncreaseInterpTest, "expr/MemoryIncrease/interp");
 
 class MidOutputTest : public MNNTestCase {
 public:
-    virtual bool run() {
+    virtual bool run(int precision) {
         auto x = _Input({100}, NCHW, halide_type_of<float>());
         auto y = x * x;
         std::string midName = "midTensor";

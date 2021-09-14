@@ -21,6 +21,7 @@ public:
 
 protected:
     int mSrcCount;
+    std::vector<float> mPostParameters;
 };
 
 class CPUDeconvolutionCommon : public CPUDeconvolutionBasic {
@@ -44,7 +45,6 @@ public:
 
 private:
     std::shared_ptr<StrassenMatrixComputor> mMatMul;
-    std::vector<std::pair<std::function<void(const float*, int)>, int>> mPreFunctions;
     std::vector<std::pair<std::function<void(float*, int)>, int>> mPostFunctions;
 };
 

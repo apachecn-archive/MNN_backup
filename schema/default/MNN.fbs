@@ -39,7 +39,7 @@ enum OpType : int {
     Dropout,
     Eltwise,
     ELU,
-    Embed,
+    Unique,
     Exp,
     ExpandDims,
     Fill,
@@ -104,7 +104,7 @@ enum OpType : int {
     SpaceToBatchND,
     SpatialProduct,
     Split,
-    SPP,
+    Segment,
     Squeeze,
     StridedSlice,
     StringJoin,
@@ -153,6 +153,7 @@ enum OpType : int {
     TensorArraySplit = 139,
     TensorArrayConcat = 140,
     LSTMBlockCell = 141,
+    Reverse = 142,
 
     Plugin = 256, //The Type load from plugin
     //Training Op Start from 257
@@ -183,6 +184,7 @@ enum OpType : int {
     While = 600,
     If    = 601,
     LayerNorm = 603,
+    GridSample = 604,
 }
 
 table Plugin {
@@ -235,6 +237,42 @@ table IfParam {
     // Each output should has two possible value from then branch and
     // else branch.
     aliases_outputs: [StringVec];
+}
+
+table RegionCommand {
+    op: Op;
+    steps:[int];
+    size:[int];
+    indexes:[int];
+    view:[View];
+
+    // How to treat output's old value for the region position
+    // If fuse < 0, it means out_new = compute
+    // -3 means output outside region should be set as zero
+    // For backend memory layout is not linear:
+    // -2 means output is totally invalid, we can rewrite output outside region
+    // -1 means the output has valid value outside compute region, we can only rewrite the value in region
+
+    // If fuse >= 0, use as a BinaryOpOperation op
+    // For example, BinaryOpOperation_DIV means: out_new = out_old / compute
+    fuse: int = -1;
+
+    // If iterIndex == -1, use 0 -> loopNumber - 1
+    // If iterIndex >= 0, for i in (inputTensor[loopIndexes])
+    iterIndexes:[int];
+}
+
+table LoopParam {
+    tensorNumber:int;
+    outputIndexes:[int];
+    inputIndexes:[int];
+    midTensors:[TensorDescribe];
+    // The loop can be parallel executed
+    parallel:bool = true;
+    // The number of loop (for i = 0; i<loopNumber; ++i)
+    loopNumber:int;
+
+    commands:[RegionCommand];
 }
 
 union OpParameter {
@@ -328,6 +366,8 @@ union OpParameter {
     LayerNorm,
     TensorArray,
     LSTMBlockCell,
+    GridSample,
+    LoopParam,
 }
 
 table Op {
@@ -356,6 +396,7 @@ table TensorDescribe {
     index: int;
     name: string;
     regions:[Region];
+    quantInfo:TensorQuantInfo;
 }
 
 enum ForwardType : byte {
@@ -387,6 +428,17 @@ table SubGraphProto {
 
     // Nodes of the subgraph.
     nodes: [Op];
+
+    // Tensor describe info
+    extraTensorDescribe:[TensorDescribe];
+}
+
+table TensorQuantInfo {
+    scale:float;
+    zero:float = 0;
+    min:float = -128;
+    max:float = 127;
+    type:DataType;
 }
 
 table Net {
@@ -403,6 +455,7 @@ table Net {
 
     // Subgraphs of the Net.
     subgraphs: [SubGraphProto];
+    mnn_uuid: string;
 }
 
 root_type Net;

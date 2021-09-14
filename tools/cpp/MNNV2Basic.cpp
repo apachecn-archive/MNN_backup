@@ -103,7 +103,7 @@ static inline int64_t getTimeInUs() {
 static int test_main(int argc, const char* argv[]) {
     if (argc < 2) {
         MNN_PRINT("========================================================================\n");
-        MNN_PRINT("Arguments: model.MNN runTimes saveAllTensors forwardType numberThread size\n");
+        MNN_PRINT("Arguments: model.MNN runLoops saveAllTensors forwardType numberThread inputSize precision\n");
         MNN_PRINT("========================================================================\n");
         return -1;
     }
@@ -142,6 +142,11 @@ static int test_main(int argc, const char* argv[]) {
         MNN_PRINT("Use extra forward type: %d\n", type);
     }
 
+    int modeNum = 4;
+    if (argc > 5) {
+        modeNum = ::atoi(argv[5]);
+    }
+
     // input dims
     std::vector<int> inputDims;
     if (argc > 6) {
@@ -164,9 +169,9 @@ static int test_main(int argc, const char* argv[]) {
     }
     MNN_PRINT("\n");
 
-    int numThread = 4;
-    if (argc > 5) {
-        numThread = ::atoi(argv[5]);
+    int precision = BackendConfig::Precision_Low;
+    if (argc > 7) {
+        precision = atoi(argv[7]);
     }
 
     // create net
@@ -182,13 +187,14 @@ static int test_main(int argc, const char* argv[]) {
     // create session
     MNN::ScheduleConfig config;
     config.type      = type;
-    config.numThread = numThread;
+    /*modeNum means gpuMode for GPU usage, Or means numThread for CPU usage.*/
+    config.numThread = modeNum;
     // If type not fount, let it failed
     config.backupType = type;
     BackendConfig backendConfig;
     // config.path.outputs.push_back("ResizeBilinear_2");
     // backendConfig.power = BackendConfig::Power_High;
-    backendConfig.precision = BackendConfig::Precision_Low;
+    backendConfig.precision = static_cast<MNN::BackendConfig::PrecisionMode>(precision);
     // backendConfig.memory = BackendConfig::Memory_High;
     config.backendConfig     = &backendConfig;
     MNN::Session* session    = NULL;
@@ -206,9 +212,17 @@ static int test_main(int argc, const char* argv[]) {
             net->resizeSession(session);
         }
     }
+    
+    //Set After resizeSession
+    net->updateCacheFile(session);
+
     float memoryUsage = 0.0f;
     net->getSessionInfo(session, MNN::Interpreter::MEMORY, &memoryUsage);
-    FUNC_PRINT_ALL(memoryUsage, f);
+    float flops = 0.0f;
+    net->getSessionInfo(session, MNN::Interpreter::FLOPS, &flops);
+    int backendType[2];
+    net->getSessionInfo(session, MNN::Interpreter::BACKENDS, backendType);
+    MNN_PRINT("Session Info: memory use %f MB, flops is %f M, backendType is %d\n", memoryUsage, flops, backendType[0]);
     auto allInput = net->getSessionInputAll(session);
     for (auto& iter : allInput) {
         auto inputTensor = iter.second;
@@ -235,7 +249,8 @@ static int test_main(int argc, const char* argv[]) {
         int size_h = inputTensor->height();
         int bpp    = inputTensor->channel();
         int batch  = inputTensor->batch();
-        MNN_PRINT("Input: %d, %d, %d, %d\n", batch, size_h, size_w, bpp);
+        MNN_PRINT("Input size:%d\n", inputTensor->elementSize());
+        inputTensor->printShape();
 
         std::ostringstream fileName;
         fileName << pwd << "input_0"
@@ -247,12 +262,14 @@ static int test_main(int argc, const char* argv[]) {
             const auto bytesLen = givenTensor.getType().bytes();
             if (bytesLen == 4) {
                 auto inputData = givenTensor.host<int32_t>();
+                double temp;
                 for (int i = 0; i < size; ++i) {
-                    input >> inputData[i];
+                    input >> temp;
+                    inputData[i] = temp;
                 }
             } else if (bytesLen == 1) {
                 auto inputData = givenTensor.host<int8_t>();
-                int pixel      = 0;
+                double pixel      = 0;
                 for (int i = 0; i < size; ++i) {
                     input >> pixel;
                     inputData[i] = static_cast<int8_t>(pixel);
@@ -264,7 +281,7 @@ static int test_main(int argc, const char* argv[]) {
                 FUNC_PRINT(givenTensor.getType().bytes());
                 auto inputData = givenTensor.host<uint8_t>();
                 for (int i = 0; i < size; ++i) {
-                    int p;
+                    double p;
                     input >> p;
                     inputData[i] = (uint8_t)p;
                 }
@@ -287,6 +304,10 @@ static int test_main(int argc, const char* argv[]) {
             }
             for (int i = 0; i < ntensors.size(); ++i) {
                 auto ntensor      = ntensors[i];
+                if (nullptr == ntensor->host<void>() && 0 == ntensor->deviceId()) {
+                    // Raster Input
+                    continue;
+                }
                 auto outDimType = ntensor->getDimensionType();
                 auto expectTensor = new MNN::Tensor(ntensor, outDimType);
                 ntensor->copyToHostTensor(expectTensor);
@@ -361,7 +382,7 @@ static int test_main(int argc, const char* argv[]) {
         {
             MNN::Tensor expectTensor2(iter.second, iter.second->getDimensionType());
             iter.second->copyToHostTensor(&expectTensor2);
-            auto outputFile = pwd + iter.first + ".txt";
+            auto outputFile = pwd + "/output/" +  iter.first + ".txt";
             if (iter.second->size() > 0) {
                 dumpTensor2File(&expectTensor2, outputFile.c_str());
             }
@@ -371,7 +392,7 @@ static int test_main(int argc, const char* argv[]) {
     // benchmark. for CPU, op time means calc duration; for others, op time means schedule duration.
     {
         int t = runTime;
-        MNN_PRINT("Run %d time:\n", t);
+        MNN_PRINT("precision:%d, Run %d time:\n", backendConfig.precision, t);
         std::map<std::string, std::pair<float, float>> opTimes;
         std::map<std::string, std::string> opTypes;
         uint64_t opBegin = 0;
@@ -401,11 +422,9 @@ static int test_main(int argc, const char* argv[]) {
             std::vector<float> times(t, 0.0f);
             for (int i = 0; i < t; ++i) {
                 auto begin = getTimeInUs();
-
                 inputTensor->copyFromHostTensor(&givenTensor);
                 net->runSessionWithCallBackInfo(session, beforeCallBack, afterCallBack, false);
                 outputTensor->copyToHostTensor(&expectTensor);
-
                 auto end = getTimeInUs();
                 times[i] = (end - begin) / 1000.0f;
             }

@@ -1,9 +1,22 @@
 #!/usr/bin/python
 import os
+import shutil
 import sys
 import onnx
 import onnxruntime as ort
 import numpy as np
+
+def makeDirForPath(filename):
+    if filename.find('/') < 0:
+        return
+    names = filename.split('/')
+    dirname = ""
+    for l in range(0, len(names)-1):
+        dirname = dirname + names[l] + '/'
+    print(dirname)
+    if os.path.exists(dirname):
+        return
+    os.makedirs(dirname)
 
 # a class to get idom for graph
 class IDominate:
@@ -93,9 +106,12 @@ class IDominate:
 
 class TestModel():
     def __copy_to_here(self, modelName):
-        newModel = 'onnx/test.onnx'
-        print(os.popen("mkdir onnx").read())
-        print(os.popen("cp " + modelName + ' ' + newModel).read())
+        newModel = os.path.join('onnx', 'test.onnx')
+        try:
+            os.mkdir("onnx")
+        except:
+            print('Dir exist')
+        shutil.copyfile(modelName, newModel)
         self.modelName = newModel
         self.model = onnx.load(self.modelName)
         self.outputs = [output.name for output in self.model.graph.output]
@@ -115,8 +131,17 @@ class TestModel():
         for inputVar in ort_session.get_inputs():
             inp = {}
             inp['name'] = inputVar.name
-            inp['shape'] = inputVar.shape
-            inputs[inputVar.name] = np.random.uniform(0.1, 1.2, inputVar.shape).astype(np.float32)
+            shapes = inputVar.shape
+            for i in range(0, len(shapes)):
+                if type(shapes[i]) == str:
+                    shapes[i] = 1
+            inp['shape'] = shapes
+            print(inputVar.type)
+            if inputVar.type.find("int64") >= 0:
+                inputs[inputVar.name] = np.random.uniform(0, 12, shapes).astype(np.int64)
+            else:
+                # Float
+                inputs[inputVar.name] = np.random.uniform(0.1, 1.2, shapes).astype(np.float32)
             jsonDict['inputs'].append(inp)
         print([output.name for output in self.model.graph.output])
         for output in self.model.graph.output:
@@ -130,7 +155,9 @@ class TestModel():
         print('inputs:')
         for key in inputs:
             print(key)
-            f = open("onnx/" + key + '.txt', 'w')
+            path = "onnx/" + key + '.txt'
+            makeDirForPath(path)
+            f = open(path, 'w')
             np.savetxt(f, inputs[key].flatten())
             f.close()
         outputs = ort_session.run(None, inputs)
@@ -139,6 +166,7 @@ class TestModel():
             outputName = self.model.graph.output[i].name
             name = 'onnx/' + outputName + '.txt'
             print(name, outputs[i].shape)
+            makeDirForPath(name)
             f = open(name, 'w')
             np.savetxt(f, outputs[i].flatten())
             f.close()
@@ -151,7 +179,8 @@ class TestModel():
         onnx.save(self.model, self.modelName)
         res = self.Test()
         is_right = ('TEST_SUCCESS' in res or 'Can\'t find var' in res)
-        print('Test Node :', self.output_map[specify_output_name], is_right)
+        if hasattr(self, 'output_map'):
+            print('Test Node :', self.output_map[specify_output_name], is_right)
         return is_right
     def __build_graph(self):
         n = len(self.model.graph.node)
@@ -219,6 +248,8 @@ class TestModel():
                 return
         if new_first_error_id > 0:
             print('### First Error Node is : ', self.nodes[new_first_error_id])
+    def TestName(self, name):
+        self.__test_specify_output(name)
     def Test(self):
         self.__run_onnx()
         res = self.__run_mnn()
@@ -231,9 +262,14 @@ class TestModel():
 
 if __name__ == '__main__':
     modelName = sys.argv[1]
-    debugMode = len(sys.argv) > 2
-    print('Debug Mode: ', debugMode)
     t = TestModel(modelName)
-    res = t.Test()
-    if 'TESTERROR' in res and debugMode:
-        t.Debug()
+    if len(sys.argv) > 2:
+        if sys.argv[2] == 'DEBUG':
+            debugMode = len(sys.argv) > 2
+            print('Debug Mode: ', debugMode)
+            t.Debug()
+        else:
+            specifyOpName = sys.argv[2]
+            t.TestName(specifyOpName)
+    else:
+        t.Test()

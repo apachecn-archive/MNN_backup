@@ -9,6 +9,7 @@
 #ifndef CPUConvolution_hpp
 #define CPUConvolution_hpp
 
+#include <mutex>
 #include "CPUBackend.hpp"
 #include "core/ConvolutionCommon.hpp"
 namespace MNN {
@@ -18,6 +19,7 @@ public:
         std::shared_ptr<Tensor> mWeight;
         std::shared_ptr<Tensor> mBias;
         Backend* backend;
+        bool copyBiasAlign(const float* bias, int outputCount);
         ~ Resource() {
             if (nullptr != mBias) {
                 backend->onReleaseBuffer(mBias.get(), Backend::STATIC);
@@ -27,16 +29,41 @@ public:
             }
         }
     };
+    struct ResourceInt8 {
+        std::vector<int> mInt8WeightKernelSum;
+        std::shared_ptr<Tensor> mWeightInt8;
+        std::shared_ptr<Tensor> mBiasInt32;
+        std::shared_ptr<Tensor> mScaleFloat;
+        // relu or relu6
+        bool mRelu;
+        int mActBits;
+
+        int8_t mInputZeroPoint;
+        int8_t mOutputZeroPoint;
+        int8_t mClampMin;
+        int8_t mClampMax;
+        Backend* backend;
+        float mInputScale;
+        float mOutputScale;
+#ifdef MNN_USE_SSE
+        std::vector<int> offsets;
+#endif
+        std::once_flag flag;
+        void updateInputOutputScale(std::vector<float> inputQuantInfo, std::vector<float> outputQuantInfo);
+        ~ ResourceInt8();
+    };
+    static std::shared_ptr<ResourceInt8> makeResourceInt8(Backend *backend, const MNN::Convolution2D *convOp,
+                                                          std::vector<float> inputQuantInfo, std::vector<float> outputQuantInfo);
     CPUConvolution(const Convolution2DCommon *convOp, Backend *b);
     virtual ~CPUConvolution() = default;
     virtual ErrorCode onResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
 
-    typedef void (*POSTFUNCTION)(float *dst, const float *bias, size_t planeNumber, size_t biasNumber);
-
-    POSTFUNCTION getPostFunction() const;
-    
     static int reorderWeightSize(int depth, int outputCount, int kernelSize, int unitDepth, int unitOC);
     // Inefficient but need not cache, use it when speed insensitive (init, onResize)
+    // source shape: [outputCount, depth, kernelSize]
+    // dest shape:
+    // transpose=false: [UP_DIV(outputCount,unitOC), UP_DIV(depth,unitDepth), kernelSize, unitDepth, unitOC]
+    // transpose=true:  [UP_DIV(outputCount,unitOC), UP_DIV(depth,unitDepth), kernelSize, unitOC, unitDepth]
     template<typename T> static void reorderWeightSlow(T* dest, const T* source, size_t depth, size_t outputCount, size_t kernelSize,
                                                        size_t unitDepth, size_t unitOC, bool transpose = false);
     /* Inefficient because of not use memcpy to support different type copy (T -> U), use it when speed insensitive (init, onResize)
@@ -51,7 +78,6 @@ protected:
     // In execute, use pad from mPadX and mPadY, don't use mCommon's pad
     mutable int mPadX;
     mutable int mPadY;
-    CPUConvolution::POSTFUNCTION mPostFunction;
 };
 
 } // namespace MNN

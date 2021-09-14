@@ -22,7 +22,7 @@
 using std::vector;
 // C = A * B
 static void reference_matmul(const vector<float>& matrix_a, const vector<float>& matrix_b, vector<float>& matrix_c,
-                             int width_a, int width_b, bool tranpose_a, bool tranpose_b) {
+                             int width_a, int width_b, bool tranpose_a, bool tranpose_b, ConvertFP32 functor) {
     int height_c = matrix_a.size() / width_a, width_c = width_b, length = width_a;
     int stride_a_h = width_a, stride_a_w = 1, stride_b_h = width_b, stride_b_w = 1;
     if (tranpose_a) {
@@ -40,9 +40,9 @@ static void reference_matmul(const vector<float>& matrix_a, const vector<float>&
         for (int w = 0; w < width_c; ++w) {
             float result = 0;
             for (int i = 0; i < length; ++i) {
-                result += matrix_a[h * stride_a_h + i * stride_a_w] * matrix_b[i * stride_b_h + w * stride_b_w];
+                result += functor(matrix_a[h * stride_a_h + i * stride_a_w]) * functor(matrix_b[i * stride_b_h + w * stride_b_w]);
             }
-            matrix_c[h * width_c + w] = result;
+            matrix_c[h * width_c + w] = functor(result);
         }
     }
 }
@@ -61,10 +61,9 @@ public:
 
 protected:
     static bool test(MNNForwardType type, const std::string& device_name, const std::string& test_op_name, int height_a,
-                     int width_a, int height_b, int width_b, bool tranpose_a, bool tranpose_b) {
+                     int width_a, int height_b, int width_b, bool tranpose_a, bool tranpose_b,  int precision, bool bConst = false) {
         auto input_a = _Input({height_a, width_a}, NCHW);
         auto input_b = _Input({height_b, width_b}, NCHW);
-        auto output  = _MatMul(input_a, input_b, tranpose_a, tranpose_b);
         vector<float> data_a, data_b, data_c;
         for (int i = 0; i < height_a * width_a; ++i) {
             auto c = randomCreate(i);
@@ -74,11 +73,38 @@ protected:
             auto c = randomCreate(10 - i);
             data_b.push_back((float)c / 255.f);
         }
-        reference_matmul(data_a, data_b, data_c, width_a, width_b, tranpose_a, tranpose_b);
+        reference_matmul(data_a, data_b, data_c, width_a, width_b, tranpose_a, tranpose_b, FP32Converter[precision]);
         ::memcpy(input_a->writeMap<float>(), data_a.data(), data_a.size() * sizeof(float));
         ::memcpy(input_b->writeMap<float>(), data_b.data(), data_b.size() * sizeof(float));
+        VARP output;
+        if (bConst) {
+            VARP A, B;
+            if (tranpose_a) {
+                A = _Transpose(input_a, {1, 0});
+            } else {
+                A = input_a;
+            }
+            //A.fix(VARP::INPUT);
+            A = _Unsqueeze(A, {2, 3});
+            if (tranpose_b) {
+                B = input_b;
+            } else {
+                B = _Transpose(input_b, {1, 0});
+            }
+            A = _Convert(A, NC4HW4);
+            std::vector<float> weight(B->getInfo()->size);
+            ::memcpy(weight.data(), B->readMap<float>(), weight.size() * sizeof(float));
+            std::vector<float> bias(B->getInfo()->dim[0]);
+            ::memset(bias.data(), 0, bias.size() * sizeof(float));
+            auto channelInput = A->getInfo()->dim[1];
+            auto channelOutput = B->getInfo()->dim[0];
+            auto convOutput = _Conv(std::move(weight), std::move(bias), A, {channelInput, channelOutput}, {1, 1});
+            output = _Convert(convOutput, NCHW);
+        } else {
+            output  = _MatMul(input_a, input_b, tranpose_a, tranpose_b);
+        }
         auto outputPtr = output->readMap<float>();
-        if (!checkVectorByRelativeError<float>(outputPtr, data_c.data(), data_c.size(), 0.005)) {
+        if (!checkVectorByRelativeError<float>(outputPtr, data_c.data(), data_c.size(), 0.05)) {
             MNN_ERROR("%s: %d x %d - %d x %d -> %d, %d , transpose: %d, %d, test failed!\n", test_op_name.c_str(),
                       width_a, height_a, width_b, height_b, output->getInfo()->dim[1], output->getInfo()->dim[0],
                       tranpose_a, tranpose_b);
@@ -96,7 +122,7 @@ public:
     virtual ~MatMulTest() = default;
 
 protected:
-    static bool test(MNNForwardType type, const std::string& device_name) {
+    static bool test(MNNForwardType type, const std::string& device_name, int precision) {
         for (int height_c = 1; height_c <= 20; ++height_c) {
             for (int width_c = 1; width_c <= 20; ++width_c) {
                 for (int length = 1; length <= 20; ++length) {
@@ -112,7 +138,7 @@ protected:
                                 std::swap(height_b, width_b);
                             }
                             bool succ = MatMulCommonTest::test(type, device_name, "MatMul", height_a, width_a, height_b,
-                                                               width_b, tranpose_a != 0, tranpose_b != 0);
+                                                               width_b, tranpose_a != 0, tranpose_b != 0, precision);
                             if (!succ) {
                                 return false;
                             }
@@ -128,9 +154,49 @@ protected:
 class MatMulTestOnCPU : public MatMulTest {
 public:
     virtual ~MatMulTestOnCPU() = default;
-    virtual bool run() {
-        return MatMulTest::test(MNN_FORWARD_CPU, "CPU");
+    virtual bool run(int precision) {
+        return MatMulTest::test(MNN_FORWARD_CPU, "CPU", precision);
+    }
+};
+
+class MatMulTestBConst : public MatMulTest {
+public:
+    virtual ~MatMulTestBConst() = default;
+
+protected:
+    virtual bool run(int precision) {
+        bool succ = MatMulCommonTest::test(MNN_FORWARD_CPU, "device_name", "MatMul", 2, 2, 2,
+                                           1, true, false, precision, true);
+        if (!succ) {
+            return false;
+        }
+        for (int height_c = 1; height_c <= 20; ++height_c) {
+            for (int width_c = 1; width_c <= 20; ++width_c) {
+                for (int length = 1; length <= 20; ++length) {
+                    int height_a = height_c, height_b = length, width_a = length, width_b = width_c;
+                    for (int tranpose_a = 0; tranpose_a <= 1; ++tranpose_a) {
+                        int height_a = height_c, width_a = length;
+                        if (tranpose_a == 1) {
+                            std::swap(height_a, width_a);
+                        }
+                        for (int tranpose_b = 0; tranpose_b <= 1; ++tranpose_b) {
+                            int height_b = length, width_b = width_c;
+                            if (tranpose_b == 1) {
+                                std::swap(height_b, width_b);
+                            }
+                            bool succ = MatMulCommonTest::test(MNN_FORWARD_CPU, "device_name", "MatMul", height_a, width_a, height_b,
+                                                               width_b, tranpose_a != 0, tranpose_b != 0, precision, true);
+                            if (!succ) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return true;
     }
 };
 
 MNNTestSuiteRegister(MatMulTestOnCPU, "op/matmul");
+MNNTestSuiteRegister(MatMulTestBConst, "op/matmulBConst");

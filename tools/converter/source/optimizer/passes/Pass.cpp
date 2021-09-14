@@ -1,9 +1,17 @@
+//
+//  Pass.cpp
+//  MNNConverter
+//
+//  Created by MNN on b'2020/12/07'.
+//  Copyright © 2018, Alibaba Group Holding Limited
+//
+
 #include "MNN/expr/Expr.hpp"
 #include "converter/source/optimizer/passes/Pass.hpp"
 #include "converter/source/optimizer/passes/PassRegistry.hpp"
 #include "converter/source/optimizer/SubGraphComplete.hpp"
 #include "converter/source/optimizer/Program.hpp"
-#include "converter/source/common/Global.hpp"
+#include "converter/source/optimizer/Global.hpp"
 
 namespace MNN {
 namespace passes {

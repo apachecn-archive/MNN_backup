@@ -25,8 +25,11 @@ struct ScheduleConfig {
     std::vector<std::string> saveTensors;
     /** forward type */
     MNNForwardType type = MNN_FORWARD_CPU;
-    /** number of threads in parallel */
-    int numThread = 4;
+    /** CPU:number of threads in parallel , Or GPU: mode setting*/
+    union {
+        int numThread = 4;
+        int mode;
+    };
 
     /** subpath to run */
     struct Path {
@@ -44,7 +47,7 @@ struct ScheduleConfig {
             Op = 0,
 
             /**
-             * Tensor Mode (NOT supported yet)
+             * Tensor Mode
              * - inputs means the inputs tensors, can NOT be empty.
              * - outputs means the outputs tensors, can NOT be empty.
              * It will find the pipeline that compute outputs from inputs.
@@ -138,6 +141,15 @@ public:
      * @param keySize        the first `keySize` bytes used as the key to check if the `cacheFile` exists.
      */
     void setCacheFile(const char* cacheFile, size_t keySize = 128);
+    
+    /**
+     * @brief The API shoud be called after last resize session.
+     * If resize session generate new cache info, try to rewrite cache file.
+     * If resize session do not generate any new cache info, just do nothing.
+     * @param session    giveb session
+     * @param flag   Protected param, not used now
+     */
+    ErrorCode updateCacheFile(Session *session, int flag = 0);
 
 public:
     /**
@@ -263,7 +275,7 @@ public:
         /** float operation needed in session in M, float* */
         FLOPS = 1,
 
-        /** Backends in session in M, int*, length >= the configs when create session */
+        /** Backends in session in M, int*, length >= 1 + number of configs when create session */
         BACKENDS = 2,
 
         ALL

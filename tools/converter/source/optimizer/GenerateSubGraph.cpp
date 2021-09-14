@@ -1,3 +1,11 @@
+//
+//  GenerateSubGraph.cpp
+//  MNNConverter
+//
+//  Created by MNN on b'2021/01/17'.
+//  Copyright © 2018, Alibaba Group Holding Limited
+//
+
 #include "GenerateSubGraph.hpp"
 #include "PostTreatUtils.hpp"
 #include <MNN/MNNDefine.h>
@@ -377,6 +385,7 @@ std::vector<std::unique_ptr<OpT>> _makeWhile(std::shared_ptr<ClusterNode> cNode,
     whileParam->cond_graph = condGraph->name;
     whileParam->body_graph = bodyGraph->name;
 
+    std::set<int> extraInputIndexes;
     // Remove Merge and find body
     std::vector<int> bodyUpdate;
     std::set<std::string> bodyOutputNames;
@@ -384,12 +393,29 @@ std::vector<std::unique_ptr<OpT>> _makeWhile(std::shared_ptr<ClusterNode> cNode,
         std::vector<std::pair<int, int>> updateIndexes;
         auto childs = std::move(cNode->nodes);
         std::map<int, int> replaceTensor;
+        std::set<int> updateToTensors;
         for (auto& op : childs) {
             if (op->type == OpType_Extra && op->main.AsExtra()->type == "Merge") {
-                updateIndexes.emplace_back(std::make_pair(op->inputIndexes[1], op->inputIndexes[0]));
-                replaceTensor.insert(std::make_pair(op->outputIndexes[0], op->inputIndexes[0]));
-                bodyUpdate.emplace_back(op->inputIndexes[1]);
-                bodyOutputNames.insert(netT->tensorName[op->inputIndexes[1]]);
+                int updateFromIdx = op->inputIndexes[1], updateToIdx = op->inputIndexes[0];
+                // if tensor_x is at outside of loop and used by two op, and these two op
+                // are all update data, so need copy tensor_x to tensor_x_copy.
+                if (updateToTensors.find(updateToIdx) != updateToTensors.end()) {
+                    std::unique_ptr<OpT> copyOp(new OpT);
+                    copyOp->type = OpType_Concat;
+                    copyOp->inputIndexes.push_back(updateToIdx);
+                    auto opName = netT->tensorName[updateToIdx] + "_copy";
+                    updateToIdx = netT->tensorName.size();
+                    copyOp->outputIndexes.push_back(updateToIdx);
+                    netT->tensorName.push_back(opName);
+                    netT->tensorNumber++;
+                    res.emplace_back(std::move(copyOp));
+                    extraInputIndexes.insert(updateToIdx);
+                }
+                updateToTensors.insert(updateToIdx);
+                updateIndexes.emplace_back(std::make_pair(updateFromIdx, updateToIdx));
+                replaceTensor.insert(std::make_pair(op->outputIndexes[0], updateToIdx));
+                bodyUpdate.emplace_back(updateFromIdx);
+                bodyOutputNames.insert(netT->tensorName[updateFromIdx]);
                 continue;
             }
             cNode->nodes.emplace_back(std::move(op));
@@ -432,7 +458,6 @@ std::vector<std::unique_ptr<OpT>> _makeWhile(std::shared_ptr<ClusterNode> cNode,
     // Create Loop Cond
     std::set<OpT*> invalidSet;
     std::vector<int> inputIndexes;
-    std::set<int> extraInputIndexes;
     for (auto& node : cNode->nodes) {
         Express::Program::createUnit(varMap, inputIndexes, cNode->nodes, node.get(), netT, invalidSet, extraInputIndexes);
     }

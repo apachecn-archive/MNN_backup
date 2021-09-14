@@ -9,7 +9,6 @@
 #include <complex.h>
 #include <string.h>
 #include <MNN/Tensor.hpp>
-#include "MNN_generated.h"
 #include "core/Backend.hpp"
 #include "core/MNNMemoryUtils.h"
 #include "core/Macro.h"
@@ -52,7 +51,10 @@ Tensor::Tensor(const Tensor* tensor, DimensionType type, bool allocMemory) {
     mBuffer.device     = 0;
     mBuffer.host       = nullptr;
     mBuffer.dim        = &mDescribe->dims[0];
-
+    auto& quantAttr = TensorUtils::getDescribe(tensor)->quantAttr;
+    if (quantAttr && buffer.type == TensorUtils::DataTypeToHalideType(quantAttr->type)) {
+        mBuffer.type = halide_type_of<float>();
+    }
     for (int i = 0; i < buffer.dimensions; ++i) {
         mBuffer.dim[i].extent = buffer.dim[i].extent;
     }
@@ -96,6 +98,10 @@ Tensor::Tensor(const Tensor* tensor, DimensionType type, bool allocMemory) {
         }
     }
     TensorUtils::setLinearLayout(this);
+
+    for (int i = mBuffer.dimensions; i < 4; i++) {
+        mBuffer.dim[i].extent = 1;
+    }
 
     if (allocMemory) {
         auto memorySize = size();
@@ -390,6 +396,59 @@ int Tensor::size() const {
         dataSize *= currentDimSize;
     }
     return dataSize;
+}
+
+void* Tensor::map(MapType mtype, DimensionType dtype) {
+    auto bn = mDescribe->backend;
+    if (nullptr == bn) {
+        return nullptr;
+    }
+    
+    auto mapPtr = bn->onMapTensor(mtype, dtype, this);
+    if(mapPtr != nullptr) {
+        // Get mapPtr in specific backend
+        return mapPtr;
+    }
+    
+    /* Common backend */
+    auto needSize = this->size();
+    void* hostPtr = malloc(needSize);
+
+    if(mtype == Tensor::MAP_TENSOR_READ) {
+        //tmpTensor alloc
+        MNN::Tensor tmpTensor(this, dtype, false);
+        tmpTensor.buffer().host = (uint8_t *)hostPtr;
+        
+        //use onCopyBuffer
+        bn->onCopyBuffer(this, &tmpTensor);
+    }
+    return hostPtr;
+}
+
+void Tensor::unmap(MapType mtype, DimensionType dtype, void *mapPtr) {
+    auto bn = mDescribe->backend;
+    if (nullptr == bn) {
+        return;
+    }
+    
+    bool ret = bn->onUnmapTensor(mtype, dtype, this, mapPtr);
+    if(true == ret) {
+        //do unmap already, just return
+        return;
+    }
+    
+    if(mtype == Tensor::MAP_TENSOR_WRITE) {
+        //srcTensor alloc
+        MNN::Tensor srcTensor(this, dtype, false);
+        srcTensor.buffer().host = (uint8_t *)mapPtr;
+
+        //use onCopyBuffer
+        bn->onCopyBuffer(&srcTensor, this);
+    }
+    if(mapPtr != nullptr) {
+        free(mapPtr);
+        mapPtr = nullptr;
+    }
 }
 
 } // namespace MNN

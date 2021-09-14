@@ -10,8 +10,6 @@
 #include "MNN/expr/MathOp.hpp"
 #include "MNN/expr/NeuralNetWorkOp.hpp"
 #include "MNN_generated.h"
-#include "../../common/Global.hpp"
-#include "cli.hpp"
 #include "MNN_compression.pb.h"
 #include <fstream>
 
@@ -136,8 +134,7 @@ static auto gRegister = []() {
                         const std::string& tensor_name = layer_proto.output(0).name();
                         if (tensor_name == convExpr->outputName(0)) {
                             auto weightProto = layer_proto.weight(0);
-                            auto ws = weightProto.scales();
-                            for (int i = 0; i < ws.size(); i++) {
+                            for (int i = 0; i < weightProto.scales().size(); i++) {
                                 weightScaleVector.emplace_back(weightProto.scales(i));
                             }
                             wClampMin = weightProto.clamp_min();

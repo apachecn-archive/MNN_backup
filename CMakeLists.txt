@@ -75,6 +75,14 @@ option(MNN_USE_SSE "Use SSE optimization for x86 if possiable" ON)
 option(MNN_BUILD_CODEGEN "Build with codegen" OFF)
 option(MNN_ENABLE_COVERAGE "Build with coverage enable" OFF)
 
+IF (NOT DEFINED MNN_USE_SPARSE_COMPUTE)
+  IF (TARGET_OS_IPHONE OR TARGET_OS_SIMULATOR)
+    set(MNN_USE_SPARSE_COMPUTE OFF)
+  ELSE()
+    set(MNN_USE_SPARSE_COMPUTE ON)
+  ENDIF()
+ENDIF()
+
 IF(NOT MNN_BUILD_SHARED_LIBS AND MNN_SEP_BUILD)
   message(WARNING "Close MNN_SEP_BUILD for static library")
   SET(MNN_SEP_BUILD OFF CACHE BOOL "<docstring>" FORCE)
@@ -97,8 +105,8 @@ IF(WIN32)
     SET(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /Zi")
     SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /Zi")
 
-    SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /wd4267 /wd4018 /wd4251 /wd4996 /wd4244 /wd4146 /wd4129 /wd4305 /wd4275")
-    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4267 /wd4018 /wd4251 /wd4996 /wd4244 /wd4146 /wd4129 /wd4305 /wd4275")
+    SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /wd4267 /wd4018 /wd4251 /wd4996 /wd4244 /wd4146 /wd4129 /wd4305 /wd4275 /wd4819")
+    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4267 /wd4018 /wd4251 /wd4996 /wd4244 /wd4146 /wd4129 /wd4305 /wd4275 /wd4819")
   ENDIF()
 ENDIF()
 
@@ -118,15 +126,11 @@ IF(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT MNN_BUILD_SHARED_LIBS AND NOT (M
   ENDIF()
 ENDIF()
 
-
 if(MNN_FORBID_MULTI_THREAD)
     add_definitions(-DMNN_FORBIT_MULTI_THREADS)
 endif()
 if(MNN_SUPPORT_TFLITE_QUAN)
     add_definitions(-DMNN_SUPPORT_TFLITE_QUAN)
-endif()
-if(MNN_BUILD_MINI)
-    add_definitions(-DMNN_BUILD_MINI)
 endif()
 
 # debug options
@@ -150,11 +154,18 @@ option(MNN_ONEDNN "Enable oneDNN" OFF)
 option(MNN_AVX512 "Enable AVX512" OFF)
 option(MNN_CUDA "Enable CUDA" OFF)
 option(MNN_TENSORRT "Enable TensorRT" OFF)
+option(MNN_COREML "Enable CoreML" OFF)
 
 if (MNN_USE_THREAD_POOL)
     message(STATUS "Use Threadpool, forbid openmp")
     set(MNN_OPENMP OFF)
     add_definitions(-DMNN_USE_THREAD_POOL)
+endif()
+
+# When build Android based on arm32 by MTL, force turn off MNN_ARM82
+if (CMAKE_SYSTEM_NAME MATCHES "^Android" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^armv7" AND NOT MNN_BUILD_FOR_ANDROID_COMMAND)
+    message(STATUS "force turn off MNN_ARM82 when build for Android based on arm32 by MTL")
+    SET(MNN_ARM82 OFF CACHE BOOL "Enable ARM82" FORCE)
 endif()
 
 # target options
@@ -180,8 +191,10 @@ message(STATUS "\tVulkan: ${MNN_VULKAN}")
 message(STATUS "\tARM82: ${MNN_ARM82}")
 message(STATUS "\toneDNN: ${MNN_ONEDNN}")
 message(STATUS "\tTensorRT: ${MNN_TENSORRT}")
+message(STATUS "\tCoreML: ${MNN_COREML}")
 message(STATUS "\tCUDA: ${MNN_CUDA}")
 message(STATUS "\tOpenMP: ${MNN_OPENMP}")
+message(STATUS "\tBF16: ${MNN_SUPPORT_BF16}")
 message(STATUS "\tThreadPool: ${MNN_USE_THREAD_POOL}")
 message(STATUS "\tHidden: ${MNN_HIDDEN}")
 message(STATUS "\tBuild Path: ${CMAKE_CURRENT_BINARY_DIR}")
@@ -307,14 +320,23 @@ FILE(GLOB MNN_Core_SRC ${CMAKE_CURRENT_LIST_DIR}/source/core/*)
 add_library(MNNCore OBJECT ${MNN_Core_SRC})
 list(APPEND MNN_OBJECTS_TO_LINK $<TARGET_OBJECTS:MNNCore>)
 list(APPEND MNN_TARGETS MNNCore)
+if(MNN_BUILD_MINI)
+    target_compile_options(MNNCore PRIVATE -DMNN_BUILD_MINI)
+endif()
 
 # CV
 FILE(GLOB MNN_CV_SRC ${CMAKE_CURRENT_LIST_DIR}/source/cv/*)
 add_library(MNNCV OBJECT ${MNN_CV_SRC})
 list(APPEND MNN_OBJECTS_TO_LINK $<TARGET_OBJECTS:MNNCV>)
 list(APPEND MNN_TARGETS MNNCV)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(X86_64)|(x64)|(X64)|(amd64)|(AMD64)|(i686)")
+    if (APPLE)
+        add_definitions(-fno-stack-check) # Workaround a Xcode 11.X bug
+    endif()
+endif()
 if (MNN_USE_SSE)
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(X86_64)|(x64)|(X64)|(amd64)|(AMD64)|(i686)")
+        target_compile_options(MNNCV PRIVATE -DMNN_USE_SSE)
         if (NOT MSVC)
             target_compile_options(MNNCV PRIVATE -msse4.1)
         endif()
@@ -341,23 +363,8 @@ add_library(MNNUtils OBJECT ${MNN_Utils_SRC})
 list(APPEND MNN_OBJECTS_TO_LINK $<TARGET_OBJECTS:MNNUtils>)
 list(APPEND MNN_TARGETS MNNUtils)
 
-# CPU
-FILE(GLOB MNN_CPU_SRC ${CMAKE_CURRENT_LIST_DIR}/source/backend/cpu/* ${CMAKE_CURRENT_LIST_DIR}/source/backend/cpu/compute/*)
-add_library(MNNCPU OBJECT ${MNN_CPU_SRC})
-list(APPEND MNN_OBJECTS_TO_LINK $<TARGET_OBJECTS:MNNCPU>)
-list(APPEND MNN_TARGETS MNNCPU)
+include(${CMAKE_CURRENT_LIST_DIR}/source/backend/cpu/CMakeLists.txt)
 
-# X86_64 AVX/SSE
-if (MNN_USE_SSE)
-include(${CMAKE_CURRENT_LIST_DIR}/source/backend/cpu/x86_x64/CMakeLists.txt)
-endif()
-
-# AArch32/64 Assemblies
-include(${CMAKE_CURRENT_LIST_DIR}/source/backend/cpu/arm/CMakeLists.txt)
-
-IF(NOT DEFINED IOS_ARCH)
-  set(IOS_ARCH "")
-ENDIF()
 
 SET(MNN_PUB_HDRS "")
 SET(MNN_EXPR_PUB_HDRS "")
@@ -377,7 +384,6 @@ list(APPEND MNN_EXPR_PUB_HDRS "${CMAKE_CURRENT_SOURCE_DIR}/include/MNN/expr/Math
 list(APPEND MNN_EXPR_PUB_HDRS "${CMAKE_CURRENT_SOURCE_DIR}/include/MNN/expr/NeuralNetWorkOp.hpp")
 list(APPEND MNN_EXPR_PUB_HDRS "${CMAKE_CURRENT_SOURCE_DIR}/include/MNN/expr/Optimizer.hpp")
 list(APPEND MNN_EXPR_PUB_HDRS "${CMAKE_CURRENT_SOURCE_DIR}/include/MNN/expr/Executor.hpp")
-list(APPEND MNN_EXPR_PUB_HDRS "${CMAKE_CURRENT_SOURCE_DIR}/include/MNN/expr/NN.hpp")
 list(APPEND MNN_EXPR_PUB_HDRS "${CMAKE_CURRENT_SOURCE_DIR}/include/MNN/expr/Module.hpp")
 list(APPEND MNN_EXPR_PUB_HDRS "${CMAKE_CURRENT_SOURCE_DIR}/include/MNN/expr/NeuralNetWorkOp.hpp")
 
@@ -411,8 +417,6 @@ if (NOT APPLE)
     endif()
 endif()
 
-set(CMAKE_CXX_FLAGS_ORIGIN ${CMAKE_CXX_FLAGS})
-set(CMAKE_C_FLAGS_ORIGIN ${CMAKE_C_FLAGS})
 if ((NOT MSVC) AND MNN_HIDDEN)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility-inlines-hidden -fvisibility=hidden")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fvisibility=hidden")
@@ -439,11 +443,26 @@ endif()
 
 # Metal
 if(MNN_METAL AND APPLE)
-    add_definitions(-DMNN_METAL_ENABLED=1)
+    target_compile_options(MNNCore PRIVATE -DMNN_METAL_ENABLED=1)
     include(${CMAKE_CURRENT_LIST_DIR}/source/backend/metal/CMakeLists.txt)
     list(APPEND MNN_TARGETS MNNMetal)
     list(APPEND MNN_OBJECTS_TO_LINK $<TARGET_OBJECTS:MNNMetal>)
 endif()
+
+# CoreML
+IF(MNN_COREML)
+    add_definitions(-DMNN_COREML_ENABLED=1)
+    add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/source/backend/coreml/)
+    list(APPEND MNN_DEPS MNNCoreML)
+    list(APPEND MNN_OBJECTS_TO_LINK $<TARGET_OBJECTS:MNNCoreML>)
+
+    find_library(COREML CoreML)
+    find_library(FOUNDATION Foundation)
+    find_library(METAL Metal)
+    list(APPEND MNN_EXTRA_DEPENDS ${COREML})
+    list(APPEND MNN_EXTRA_DEPENDS ${FOUNDATION})
+    list(APPEND MNN_EXTRA_DEPENDS ${METAL})
+ENDIF()
 
 # Vulkan
 IF(MNN_VULKAN)
@@ -514,16 +533,6 @@ IF(MNN_CUDA)
   list(APPEND MNN_EXTRA_DEPENDS ${MNN_CUDA_LIBS})
 ENDIF()
 
-IF(CMAKE_SYSTEM_PROCESSOR MATCHES "^aarch64" OR IOS_ARCH STREQUAL "arm64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
-# ARM82 Assemblies
-  IF(MNN_ARM82)
-    add_definitions(-DENABLE_ARMV82)
-    add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/source/backend/arm82/)
-    list(APPEND MNN_TARGETS MNN_Arm82)
-    list(APPEND MNN_OBJECTS_TO_LINK $<TARGET_OBJECTS:MNN_Arm82>)
-  ENDIF()
-ENDIF()
-
 # Express
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/express/)
 IF(MNN_SEP_BUILD)
@@ -534,7 +543,7 @@ ELSE()
 ENDIF()
 
 # Train
-IF(MNN_BUILD_TRAIN)
+IF(MNN_BUILD_TRAIN OR MNN_BUILD_QUANTOOLS)
   add_subdirectory(tools/train)
   IF(MNN_SEP_BUILD)
     list(APPEND MNN_DEPS MNNTrain)
@@ -555,12 +564,12 @@ IF(MNN_NPU)
     add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/source/backend/hiai/)
     IF(MNN_SEP_BUILD)
         list(APPEND MNN_DEPS MNN_NPU)
-        list(APPEND MNN_DEPS ${CMAKE_CURRENT_LIST_DIR}/source/backend/hiai/3rdParty/${ANDROID_ABI}/libhiai.so)
-        list(APPEND MNN_DEPS ${CMAKE_CURRENT_LIST_DIR}/source/backend/hiai/3rdParty/${ANDROID_ABI}/libhiai_ir_build.so)
-        list(APPEND MNN_DEPS ${CMAKE_CURRENT_LIST_DIR}/source/backend/hiai/3rdParty/${ANDROID_ABI}/libhiai_ir.so)
     ELSE()
         list(APPEND MNN_TARGETS MNN_NPU)
         list(APPEND MNN_OBJECTS_TO_LINK $<TARGET_OBJECTS:MNN_NPU>)
+        list(APPEND MNN_EXTRA_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/source/backend/hiai/3rdParty/${ANDROID_ABI}/libhiai.so)
+        list(APPEND MNN_EXTRA_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/source/backend/hiai/3rdParty/${ANDROID_ABI}/libhiai_ir_build.so)
+        list(APPEND MNN_EXTRA_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/source/backend/hiai/3rdParty/${ANDROID_ABI}/libhiai_ir.so)
     ENDIF()
 ENDIF()
 

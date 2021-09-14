@@ -1,8 +1,8 @@
 //
 //  RandomUniformTf.cpp
-//  MNN
+//  MNNConverter
 //
-//  Created by wangzhaode on 2020/8/14.
+//  Created by MNN on 2020/08/14.
 //  Copyright © 2018, Alibaba Group Holding Limited
 //
 
@@ -32,9 +32,6 @@ void RandomUniformTf::run(MNN::OpT *dstOp, TmpNode *srcNode) {
     }
     if (find_attr_value(srcNode->tfNode, "type", value)) {
         parameter->type = static_cast<MNN::DataType>(value.i());
-    }
-    if (find_attr_value(srcNode->tfNode, "T", value)) {
-        parameter->T = static_cast<MNN::DataType>(value.i());
     }
     dstOp->main.value = parameter;
 }

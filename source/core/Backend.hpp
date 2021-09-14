@@ -10,7 +10,6 @@
 #define Backend_hpp
 
 #include <MNN/MNNForwardType.h>
-#include <stdio.h>
 #include <MNN/ErrorCode.hpp>
 #include <MNN/Tensor.hpp>
 #include <map>
@@ -33,8 +32,11 @@ public:
     struct Info {
         /** forward type. */
         MNNForwardType type = MNN_FORWARD_CPU;
-        /** for CPU only. number of threads. */
-        int numThread = 4;
+        /** numThread for CPU . number of threads.  gpuMode for GPU only. tuning/memory Mode setting. */
+        union {
+            int numThread = 4;
+            int gpuMode;
+        };
         /** user data. */
         BackendConfig* user = NULL;
         enum Mode {
@@ -161,6 +163,15 @@ public:
      */
     virtual void onCopyBuffer(const Tensor* srcTensor, const Tensor* dstTensor) const = 0;
 
+    /**
+     * @brief get runtime datatype.
+     * @param op      the run op.
+     * @param qtype    quant data type.
+     * @return support type for op.
+     */
+    virtual halide_type_t getRunType(const MNN::Op* op, halide_type_t qtype, halide_type_t rtype) {
+        return rtype;
+    }
 public:
     /**
      * @brief get forward type.
@@ -169,7 +180,20 @@ public:
     inline MNNForwardType type() const {
         return mType;
     }
+    
+public:
+    /**
+     * @brief get Gpu Tensor map host ptr/ unmap
+     */
+    virtual void* onMapTensor(Tensor::MapType mtype, Tensor::DimensionType dtype, const Tensor* srcTensor) {
+        return nullptr;
+    }
 
+    virtual bool onUnmapTensor(Tensor::MapType mtype, Tensor::DimensionType dtype, const Tensor* dstTensor, void* mapPtr) {
+        return false;
+    }
+
+    
 private:
     const MNNForwardType mType;
 };
@@ -185,10 +209,11 @@ public:
     enum CompilerType {
         Compiler_Geometry = 0,
         Compiler_Origin = 1,
+        Compiler_Loop = 2,
     };
 
     virtual CompilerType onGetCompilerType() const {
-        return Compiler_Geometry;
+        return Compiler_Loop;
     }
 
     virtual ~Runtime() = default;
@@ -196,7 +221,7 @@ public:
      @brief create backend
      @return created backend
      */
-    virtual Backend* onCreate() const = 0;
+    virtual Backend* onCreate(const BackendConfig* config = nullptr) const = 0;
 
     /**
      @brief clear unuseful resource
@@ -213,7 +238,8 @@ public:
 
     // If buffer is not nullptr, try copy cache, else delete cache
     virtual bool onSetCache(const void* buffer, size_t size) {
-        return false;
+        //default cache valid, avoid being reset
+        return true;
     }
 
     virtual std::pair<const void*, size_t> onGetCache() {

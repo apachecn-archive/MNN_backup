@@ -56,7 +56,7 @@ if os.path.isdir('../../schema/private'):
 print ('Building with python wheel with package name ', package_name)
 
 version = args.version
-depend_pip_packages = ['flatbuffers', 'numpy']
+depend_pip_packages = ['flatbuffers', 'numpy', 'aliyun-log-python-sdk']
 if package_name == 'MNN':
     README = os.path.join(os.getcwd(), "README.md")
 else:
@@ -132,6 +132,8 @@ def configure_extension_build():
     engine_include_dirs += [os.path.join(root_dir, "express")]
     engine_include_dirs += [os.path.join(root_dir, "express", "module")]
     engine_include_dirs += [os.path.join(root_dir, "source")]
+    engine_include_dirs += [os.path.join(root_dir, "tools")]
+    engine_include_dirs += [os.path.join(root_dir, "tools", "train", "source", "nn")]
     engine_include_dirs += [os.path.join(root_dir, "tools", "train", "source", "grad")]
     engine_include_dirs += [os.path.join(root_dir, "tools", "train", "source", "module")]
     engine_include_dirs += [os.path.join(root_dir, "tools", "train", "source", "parameters")]
@@ -185,6 +187,7 @@ def configure_extension_build():
     tools_include_dirs += [os.path.join(root_dir, "source", "core")]
     tools_include_dirs += [os.path.join(root_dir, "schema", "current")]
     tools_include_dirs += [os.path.join(root_dir, "source")]
+    tools_include_dirs += [np.get_include()]
     if IS_WINDOWS:
         tools_include_dirs += [os.path.join(os.environ['Protobuf_SRC_ROOT_FOLDER'], 'src')]
 
@@ -206,7 +209,6 @@ def configure_extension_build():
         engine_extra_link_args += ['-Wl,--no-whole-archive']
     if IS_WINDOWS:
         engine_extra_link_args += ['/WHOLEARCHIVE:MNN.lib']
-        engine_extra_link_args += ['/WHOLEARCHIVE:MNNTrain.lib']
     if IS_DARWIN:
         tools_extra_link_args += ['-Wl,-all_load']
         tools_extra_link_args += tools_depend
@@ -281,7 +283,6 @@ def configure_extension_build():
         'console_scripts': [
             'mnnconvert = MNN.tools.mnnconvert:main',
             'mnnquant = MNN.tools.mnnquant:main',
-            'mnnops = MNN.tools.mnnops:main',
             'mnn = MNN.tools.mnn:main'
         ]
     }

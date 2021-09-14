@@ -21,8 +21,11 @@ public:
         
         auto input0          = inputs[0];
         auto input1          = inputs[1];
+        Tensor* bias         = nullptr;
         auto output          = outputs[0];
-
+        if (inputs.size() > 2) {
+            bias = inputs[2];
+        }
         auto outputDes = TensorUtils::getDescribe(output);
         outputDes->regions.clear();
         // Fill output by zero if one of inputs is empty.
@@ -40,7 +43,6 @@ public:
             return true;
         }
         // Broadcast matmul don't support bias
-        MNN_ASSERT(inputs.size() == 2);
         // Split MatMul
         if (op->type() == OpType_BatchMatMul) {
             auto param = op->main_as_BatchMatMulParam();
@@ -51,12 +53,22 @@ public:
             transposeA = param->transposeA();
             transposeB = param->transposeB();
         }
-        outputDes->memoryType = Tensor::InsideDescribe::MEMORY_VIRTUAL;
+        outputDes->memoryType = Tensor::InsideDescribe::MEMORY_BACKEND;
         auto o0Dim = output->dimensions();
         int input0_end1 = input0->length(input0->dimensions()-2);
         int input0_end0 = input0->length(input0->dimensions()-1);
         int input1_end1 = input1->length(input1->dimensions()-2);
         int input1_end0 = input1->length(input1->dimensions()-1);
+        int e = input0_end1;
+        int l = input0_end0;
+        int h = input1_end0;
+        if (transposeA) {
+            e = input0_end0;
+            l = input0_end1;
+        }
+        if (transposeB) {
+            h = input1_end1;
+        }
         // Compute BroastCast Dims
         auto dimOffset = o0Dim - 2;
         const int maxDimensions = dimOffset;
@@ -80,21 +92,95 @@ public:
                 i1Size *= input1->length(i - i1Offset);
             }
         }
-        std::vector<uint8_t> opBuffer;
-        {
-            flatbuffers::FlatBufferBuilder builder;
-            MatMulBuilder builder_(builder);
-            builder_.add_transposeA(transposeA);
-            builder_.add_transposeB(transposeB);
-            auto mainOffset = builder_.Finish().Union();
-            OpBuilder opB(builder);
-            opB.add_type(OpType_MatMul);
-            opB.add_main(mainOffset);
-            opB.add_main_type(OpParameter_MatMul);
-            builder.Finish(opB.Finish());
-            opBuffer.resize(builder.GetSize());
-            ::memcpy(opBuffer.data(), builder.GetBufferPointer(), builder.GetSize());
+        std::unique_ptr<OpT> newop(new OpT);
+        if (nullptr != op->name()) {
+            newop->name = op->name()->str();
         }
+        newop->type = OpType_While;
+        newop->main.value = new LoopParamT;
+        newop->main.type = OpParameter_LoopParam;
+        auto loop = newop->main.AsLoopParam();
+        loop->parallel = true;
+        loop->tensorNumber = 5;
+        loop->inputIndexes = {0, 1, 2, 3};
+        loop->outputIndexes = {4};
+        loop->loopNumber = totalSize;
+        std::unique_ptr<RegionCommandT> rcmd(new RegionCommandT);
+        rcmd->size = {e, l, h};
+        rcmd->view.resize(3);
+        rcmd->view[1].reset(new ViewT);
+        rcmd->view[1]->offset = 0;
+        if (transposeA) {
+            rcmd->view[1]->stride = {1, e, 0};
+        } else {
+            rcmd->view[1]->stride = {l, 1, 0};
+        }
+        rcmd->view[2].reset(new ViewT);
+        rcmd->view[2]->offset = 0;
+        if (transposeB) {
+            rcmd->view[2]->stride = {0, 1, l};
+        } else {
+            rcmd->view[2]->stride = {0, h, 1};
+        }
+        rcmd->view[0].reset(new ViewT);
+        rcmd->view[0]->offset = 0;
+        rcmd->view[0]->stride = {h, 0, 1};
+        rcmd->indexes = {4, 0, 1};// C, A, B
+        rcmd->steps = {e*h, e*l, l*h};
+        rcmd->iterIndexes = {-1, 2, 3};
+        if (bias != nullptr) {
+            loop->tensorNumber = 6;
+            loop->inputIndexes = {0, 1, 2, 3, 5};
+            loop->outputIndexes = {4};
+            std::unique_ptr<ViewT> biasView(new ViewT);
+            biasView->offset = 0;
+            biasView->stride = {0, 0, 1};
+            rcmd->view.emplace_back(std::move(biasView));
+            rcmd->iterIndexes.emplace_back(-1);
+            rcmd->steps.emplace_back(0);
+            rcmd->indexes = {4, 0, 1, 5};
+        }
+        rcmd->op.reset(new OpT);
+        rcmd->op->type = OpType_MatMul;
+        rcmd->op->main.type = OpParameter_MatMul;
+        rcmd->op->main.value = new MatMulT;
+        rcmd->op->main.AsMatMul()->transposeB = transposeB;
+        rcmd->op->main.AsMatMul()->transposeA = transposeA;
+        if (i0Size == i1Size && i0Size == totalSize) {
+            // Don't need broadcast
+            loop->tensorNumber = 3;
+            loop->inputIndexes = {0, 1};
+            loop->outputIndexes = {2};
+            rcmd->iterIndexes = {-1, -1, -1};
+            rcmd->indexes = {2, 0, 1};
+            if (bias != nullptr) {
+                loop->tensorNumber = 4;
+                loop->inputIndexes = {0, 1, 3};
+                loop->outputIndexes = {2};
+                rcmd->iterIndexes = {-1, -1, -1, -1};
+                rcmd->indexes = {2, 0, 1, 3};
+            }
+            loop->commands.emplace_back(std::move(rcmd));
+            flatbuffers::FlatBufferBuilder builder;
+            builder.Finish(Op::Pack(builder, newop.get()));
+            if (bias != nullptr) {
+                auto cmd = GeometryComputerUtils::makeCommand(builder, {input0, input1, bias}, outputs);
+                res.command.emplace_back(std::move(cmd));
+            } else {
+                auto cmd = GeometryComputerUtils::makeCommand(builder, {input0, input1}, outputs);
+                res.command.emplace_back(std::move(cmd));
+            }
+            return true;
+        }
+        loop->commands.emplace_back(std::move(rcmd));
+        flatbuffers::FlatBufferBuilder builder;
+        builder.Finish(Op::Pack(builder, newop.get()));
+        auto i0OffsetTensor = context.allocConst(op, {totalSize}, halide_type_of<int>());
+        auto i1OffsetTensor = context.allocConst(op, {totalSize}, halide_type_of<int>());
+        if (nullptr == i0OffsetTensor || nullptr == i1OffsetTensor) {
+            return false;
+        }
+        // Commpute Offset Index
         for (int index = 0; index < totalSize; ++index) {
             // Unrool the cords
             auto c = index;
@@ -106,107 +192,21 @@ public:
                 i1Offset += input1Strides[i] * cord;
                 c = c % outputStrides[i];
             }
-            std::shared_ptr<Tensor> tmpInput0;
-            {
-                tmpInput0.reset(new Tensor);
-                tmpInput0->buffer().type = halide_type_of<float>();
-                tmpInput0->buffer().dimensions = 2;
-                tmpInput0->setLength(0, input0_end1);
-                tmpInput0->setLength(1, input0_end0);
-                auto suboutputDes = TensorUtils::getDescribe(tmpInput0.get());
-                suboutputDes->memoryType = Tensor::InsideDescribe::MEMORY_VIRTUAL;
-
-                Tensor::InsideDescribe::Region desReg;
-                desReg.size[0] = 1;
-                desReg.size[1] = input0_end1;
-                desReg.size[2] = input0_end0;
-                desReg.dst.offset = 0;
-                desReg.dst.stride[0] = input0_end0*input0_end1;
-                desReg.dst.stride[1] = input0_end0;
-                desReg.dst.stride[2] = 1;
-                desReg.src.offset = i0Offset*input0_end0*input0_end1;
-                desReg.src.stride[0] = input0_end0*input0_end1;
-                desReg.src.stride[1] = input0_end0;
-                desReg.src.stride[2] = 1;
-                desReg.origin = input0;
-                suboutputDes->regions.emplace_back(std::move(desReg));
-                
-                res.extras.emplace_back(tmpInput0);
-            }
-            
-            std::shared_ptr<Tensor> tmpInput1;
-            {
-                tmpInput1.reset(new Tensor);
-                tmpInput1->buffer().type = halide_type_of<float>();
-                tmpInput1->buffer().dimensions = 2;
-                tmpInput1->setLength(0, input1_end1);
-                tmpInput1->setLength(1, input1_end0);
-                auto suboutputDes = TensorUtils::getDescribe(tmpInput1.get());
-                suboutputDes->memoryType = Tensor::InsideDescribe::MEMORY_VIRTUAL;
-
-                Tensor::InsideDescribe::Region desReg;
-                desReg.size[0] = 1;
-                desReg.size[1] = input1_end1;
-                desReg.size[2] = input1_end0;
-                desReg.dst.offset = 0;
-                desReg.dst.stride[0] = input1_end0*input1_end1;
-                desReg.dst.stride[1] = input1_end0;
-                desReg.dst.stride[2] = 1;
-                desReg.src.offset = i1Offset*input1_end0*input1_end1;
-                desReg.src.stride[0] = input1_end0*input1_end1;
-                desReg.src.stride[1] = input1_end0;
-                desReg.src.stride[2] = 1;
-                desReg.origin = input1;
-                suboutputDes->regions.emplace_back(std::move(desReg));
-                
-                res.extras.emplace_back(tmpInput1);
-            }
-            
-            int dim0 = transposeA ? input0_end0 : input0_end1;
-            int dim1 = transposeB ? input1_end1 : input1_end0;
-            std::shared_ptr<Tensor> C;
-            {
-                // C = MatMul(B, A)
-                C.reset(new Tensor);
-                C->buffer().type = halide_type_of<float>();
-                C->buffer().dimensions = 2;
-
-                C->setLength(0, dim0);
-                C->setLength(1, dim1);
-
-                res.extras.emplace_back(C);
-                Command cmd;
-                cmd.buffer = opBuffer;
-                cmd.inputs = {tmpInput0.get(), tmpInput1.get()};
-                cmd.outputs = {C.get()};
-                res.command.emplace_back(std::move(cmd));
-            }
-            
-            {
-                
-                Tensor::InsideDescribe::Region desReg;
-                desReg.size[0] = 1;
-                desReg.size[1] = dim0;
-                desReg.size[2] = dim1;
-                desReg.dst.offset = index*dim0*dim1;
-                desReg.dst.stride[0] = dim0*dim1;
-                desReg.dst.stride[1] = dim1;
-                desReg.dst.stride[2] = 1;
-                desReg.src.offset = 0;
-                desReg.src.stride[0] = dim0*dim1;
-                desReg.src.stride[1] = dim1;
-                desReg.src.stride[2] = 1;
-                desReg.origin = C.get();
-                outputDes->regions.emplace_back(std::move(desReg));
-            }
+            i0OffsetTensor->host<int>()[index] = i0Offset;
+            i1OffsetTensor->host<int>()[index] = i1Offset;
         }
+        std::vector<Tensor*> inputLoops{input0, input1, i0OffsetTensor.get(), i1OffsetTensor.get()};
+        if (nullptr != bias) {
+            inputLoops.emplace_back(bias);
+        }
+        auto cmd = GeometryComputerUtils::makeCommand(builder, inputLoops, outputs);
+        res.command.emplace_back(std::move(cmd));
         return true;
     }
 };
-
 static void _create() {
     std::shared_ptr<GeometryComputer> comp(new GeometryBatchMatMul);
-    GeometryComputer::registerGeometryComputer(comp, {OpType_MatMul});
+    GeometryComputer::registerGeometryComputer(comp, {OpType_BatchMatMul, OpType_MatMul}, Runtime::Compiler_Loop);
 }
 
 REGISTER_GEOMETRY(GeometryBatchMatMul, _create);

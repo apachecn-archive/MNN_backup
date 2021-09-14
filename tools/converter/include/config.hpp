@@ -8,25 +8,10 @@
 
 #ifndef CONFIG_HPP
 #define CONFIG_HPP
-#include <mutex>
 #include <string>
+#include <MNN/MNNDefine.h>
 
-class ProjectConfig {
-public:
-    static const std::string version;
-    static const std::string buildTime;
-
-    static ProjectConfig *obtainSingletonInstance();
-
-private:
-    ProjectConfig() = default;
-
-private:
-    static ProjectConfig *m_pConfig;
-    static std::mutex m_mutex;
-};
-
-struct modelConfig {
+class MNN_PUBLIC modelConfig {
 public:
     modelConfig()
         : MNNModel(),
@@ -37,7 +22,7 @@ public:
           benchmarkModel(false),
           saveHalfFloat(false){
     }
-    enum MODEL_SOURCE { TENSORFLOW = 0, CAFFE, ONNX, MNN, TFLITE, TORCHSCRIPT, MAX_SOURCE };
+    enum MODEL_SOURCE { TENSORFLOW = 0, CAFFE, ONNX, MNN, TFLITE, TORCH, MAX_SOURCE };
 
     // MNN model path
     std::string MNNModel;
@@ -61,6 +46,10 @@ public:
     std::string compressionParamsFile = "";
     bool saveStaticModel = false;
     int optimizePrefer = 0;
+    float targetVersion = 1.3;
+    int defaultBatchSize = 0;
+    int optimizeLevel = 1;
+    bool keepInputFormat = false;
 };
 
 #endif // CONFIG_HPP
